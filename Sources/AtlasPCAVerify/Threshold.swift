@@ -38,6 +38,36 @@ enum Threshold {
             + Canonical.sha256(message) + signerSetHash(signerSet) + [UInt8(t)]
     }
 
+    /// v2.1 agent-leaf share binding. Verify a SINGLE `primitives.threshold_share[]` entry, FAIL-CLOSED.
+    /// RECOMPUTES the bound message from scratch (does NOT trust the stored `share_message` / `signer_set_hash`):
+    ///   `"atlas-pca/share/<role>\0" ‖ sha256(thresholdMessage) ‖ signerSetHash(signer_set) ‖ t(1 byte)`
+    /// and confirms `share.sig` verifies over it under `share.publicKey` (routed through the SAME suite seam
+    /// as the leaf, so a PQ/hybrid share would use `share.pq_pk`/`share.pq_sig`). Returns `false` on any
+    /// malformed input; never throws. The PRE-v2.1 bare agent share (a `sig` over the bare threshold message)
+    /// and a cross-signer-set replay (a share bound to a DIFFERENT signer set) therefore BOTH fail — the clean
+    /// break the v2.1 binding mandates. `entry` is a `primitives.threshold_share[]` object.
+    static func verifyShare(_ entry: JSONValue) -> Bool {
+        guard let o = entry.asObject,
+              let role = o["role"]?.asString,
+              let t = o["t"]?.safeInt, t >= 0, t <= 255,
+              let setArr = o["signer_set"]?.asArray,
+              let tmB64 = o["threshold_message"]?.asString,
+              let tm = Base64URLStrict.decode(tmB64),
+              let share = o["share"]?.asObject,
+              let pk = share["publicKey"]?.asString else { return false }
+        let signers = setArr.map { s -> Signer? in
+            guard let r = s.get("role")?.asString, let rr = Role(rawValue: r),
+                  let p = s.get("publicKey")?.asString else { return nil }
+            return Signer(role: rr, publicKey: p)
+        }
+        guard !signers.contains(where: { $0 == nil }) else { return false }
+        let ssh = signerSetHash(signers.compactMap { $0 })
+        // Bound share message: domain(role) ‖ sha256(thresholdMessage) ‖ signerSetHash ‖ t.
+        let msg = Canonical.utf8("atlas-pca/share/\(role)") + [0x00] + Canonical.sha256(tm) + ssh + [UInt8(t)]
+        return PQ.verifyLeaf(alg: share["alg"]?.asString, holder: pk, pqPublicKey: share["pq_pk"]?.asString,
+                             message: msg, sig: share["sig"]?.asString, pqSig: share["pq_sig"]?.asString)
+    }
+
     /// Verify a t-of-n multi-signature over `message` (= `thresholdMessage(pcactn)`). Total; never throws.
     /// The signer set is validated first (each role exactly one key; no key under two roles); a share counts
     /// iff its role+key are registered and its signature verifies over that role's message; counts DISTINCT keys.
@@ -72,7 +102,9 @@ enum Threshold {
             if share.publicKey != registered {
                 note("share for role \(share.role.rawValue) uses a key not registered for that role"); continue
             }
-            let signed = share.role == .agent ? message : shareMessage(share.role, message, signerSet, t)
+            // v2.1 agent-leaf binding: EVERY role (agent included) signs the role/signerSetHash/t-bound
+            // share message — the clean break from the pre-v2.1 bare-threshold-message agent share.
+            let signed = shareMessage(share.role, message, signerSet, t)
             if !Ed25519Strict.verifyB64u(share.publicKey, signed, share.sig) {
                 note("invalid signature for role \(share.role.rawValue)"); continue
             }

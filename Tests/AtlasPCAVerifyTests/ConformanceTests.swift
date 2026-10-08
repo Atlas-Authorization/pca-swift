@@ -100,6 +100,49 @@ final class ConformanceTests: XCTestCase {
         }
     }
 
+    // ---- suite-aware skip (B4 post-quantum crypto-agility) ----
+
+    /// The signature suites this Swift verifier implements for a GENUINE crypto verdict — on the leaf
+    /// (`requires:"pq"`), on non-leaf capability-chain hops (`requires:"pq-nonleaf"`), the threshold-share
+    /// binding, and the PQ transparency artifacts. These are the THREE CROSS-IMPL suites every conformant
+    /// verifier must agree on: classical Ed25519, the pure lattice ML-DSA-65 (FIPS-204, via CryptoKit's
+    /// `MLDSA65`), and the hybrid Ed25519 + ML-DSA-65. The other 7 registered suites (ml-dsa-87,
+    /// slh-dsa-sha2-128f/256s, their hybrids, and the SUF-CMA nested hybrid) are NOT wired in Swift, so a
+    /// vector needing a real signature verdict under them is skipped EXPLICITLY — never silently passed.
+    static let SUPPORTED_SUITES: Set<String> = ["ed25519", "ml-dsa-65", "hybrid-ed25519-ml-dsa-65"]
+
+    /// The concrete suite a vector exercises that this verifier does NOT implement, if any: the leaf `alg`
+    /// for `requires:"pq"`, or the first non-supported capability-hop `alg` for `requires:"pq-nonleaf"`.
+    /// `nil` for core vectors and for vectors that stay entirely within `SUPPORTED_SUITES`.
+    static func unsupportedSuite(_ v: JSONValue) -> String? {
+        guard let p = v.get("pcactn")?.asObject else { return nil } // raw-json (wire) + core vectors
+        func alg(_ o: [String: JSONValue]) -> String { o["alg"]?.asString ?? "ed25519" }
+        switch v.get("requires")?.asString {
+        case "pq":
+            let a = alg(p)
+            return SUPPORTED_SUITES.contains(a) ? nil : a
+        case "pq-nonleaf":
+            guard let chain = p["cap_chain"]?.asArray else { return nil }
+            for h in chain {
+                if let o = h.asObject {
+                    let a = alg(o)
+                    if !SUPPORTED_SUITES.contains(a) { return a }
+                }
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    /// Whether the EXPECTED verdict is a terminal `{wire:false}` — a wire failure is suite-AGNOSTIC (an
+    /// unknown `alg`, or a `pq_sig` whose size the suite cannot admit, is rejected at the wire stage whether
+    /// or not we implement the suite), so these negatives still RUN and pass even for an unimplemented suite.
+    static func terminalWireFalse(_ checks: [String: JSONValue]) -> Bool {
+        guard checks.count == 1, case .bool(false)? = checks["wire"] else { return false }
+        return true
+    }
+
     // ---- the verdict corpus ----
 
     func testVectors() throws {
@@ -109,11 +152,23 @@ final class ConformanceTests: XCTestCase {
         XCTAssertFalse(vectors.isEmpty)
 
         var failures: [String] = []
+        var skippedBySuite: [String: Int] = [:]
         for v in vectors {
             guard let name = v.get("name")?.asString,
                   let now = v.get("context")?.get("now")?.safeInt,
                   let aud = v.get("context")?.get("aud")?.asString else {
                 failures.append("<malformed vector>"); continue
+            }
+            guard let expect = v.get("expect"),
+                  let wantAllow = { () -> Bool? in if case let .bool(b) = expect.get("allow") { return b }; return nil }(),
+                  let wantChecks = expect.get("checks")?.asObject else {
+                failures.append("\(name): malformed expect"); continue
+            }
+            // SUITE-AWARE skip: skip ONLY a vector whose expected verdict needs a genuine crypto verdict under
+            // a suite Swift does not implement. A terminal {wire:false} negative (suite-agnostic) still runs.
+            if let suite = Self.unsupportedSuite(v), !Self.terminalWireFalse(wantChecks) {
+                skippedBySuite[suite, default: 0] += 1
+                continue
             }
             let grant = v.get("grant") ?? .null
 
@@ -126,11 +181,6 @@ final class ConformanceTests: XCTestCase {
                 got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud)
             }
 
-            guard let expect = v.get("expect"),
-                  let wantAllow = { () -> Bool? in if case let .bool(b) = expect.get("allow") { return b }; return nil }(),
-                  let wantChecks = expect.get("checks")?.asObject else {
-                failures.append("\(name): malformed expect"); continue
-            }
             if got.allow != wantAllow {
                 failures.append("\(name): allow = \(got.allow), want \(wantAllow) (\(got.reason))")
             }
@@ -144,10 +194,15 @@ final class ConformanceTests: XCTestCase {
                 }
             }
         }
+        let skipped = skippedBySuite.values.reduce(0, +)
+        let ran = vectors.count - skipped
         if !failures.isEmpty {
-            XCTFail("\(failures.count) of \(vectors.count) vectors failed:\n" + failures.joined(separator: "\n"))
+            XCTFail("\(failures.count) of \(ran) run vectors failed:\n" + failures.joined(separator: "\n"))
         } else {
-            print("PCA conformance: \(vectors.count)/\(vectors.count) vectors passed")
+            print("PCA conformance: \(ran)/\(vectors.count) vectors passed; \(skipped) skipped (suites not in Swift)")
+            for s in skippedBySuite.keys.sorted() {
+                print("  skipped \(skippedBySuite[s]!) vector(s) requiring unimplemented suite \"\(s)\"")
+            }
         }
     }
 
@@ -214,28 +269,90 @@ final class ConformanceTests: XCTestCase {
         XCTAssertEqual(Merkle.paramsDigest(nil), prim.get("params_digest_empty")?.asString)
     }
 
-    func testThresholdSharePrimitives() throws {
+    /// v2.1 agent-leaf threshold-share binding. Every `primitives.threshold_share[]` entry must verify over
+    /// the `signerSetHash‖t`-bound share message (`Threshold.verifyShare` RECOMPUTES the bound message, with
+    /// `signerSetHash` recomputed from the signer set — it never trusts the stored `share_message`) iff
+    /// `valid`. In particular the PRE-v2.1 bare agent share and a cross-signer-set replay MUST be REJECTED,
+    /// and the bound shares ACCEPTED. The computation of `signerSetHash` / `shareMessage` is sanity-checked
+    /// against the stored values too. All corpus share vectors are Ed25519 (no PQ suite needed).
+    func testThresholdShares() throws {
         let doc = try Self.load("vectors.json")
-        guard let shares = doc.get("primitives")?.get("threshold_share")?.asArray else { return }
+        guard let shares = doc.get("primitives")?.get("threshold_share")?.asArray, !shares.isEmpty else {
+            return XCTFail("no threshold_share primitives")
+        }
+        var failures: [String] = []
+        var accepted = 0, rejected = 0
+        var bareRejected = false, wrongSetRejected = false
         for ts in shares {
-            guard let roleStr = ts.get("role")?.asString, let role = Threshold.Role(rawValue: roleStr),
-                  let t = ts.get("t")?.safeInt,
-                  let setArr = ts.get("signer_set")?.asArray,
-                  let msgB64 = ts.get("threshold_message")?.asString,
-                  let msg = Base64URLStrict.decode(msgB64),
-                  let setHashB64 = ts.get("signer_set_hash")?.asString,
-                  let setHash = Base64URLStrict.decode(setHashB64),
-                  let shareMsgB64 = ts.get("share_message")?.asString,
-                  let shareMsg = Base64URLStrict.decode(shareMsgB64) else {
-                XCTFail("malformed threshold_share vector"); continue
+            let name = ts.get("name")?.asString ?? ts.get("role")?.asString ?? "<unnamed>"
+            let want: Bool = { if case let .bool(b)? = ts.get("valid") { return b }; return true }()
+
+            // sanity: signerSetHash + bound shareMessage are recomputed byte-for-byte from the signer set.
+            if let roleStr = ts.get("role")?.asString, let role = Threshold.Role(rawValue: roleStr),
+               let t = ts.get("t")?.safeInt,
+               let setArr = ts.get("signer_set")?.asArray,
+               let msg = ts.get("threshold_message")?.asString.flatMap({ Base64URLStrict.decode($0) }),
+               let setHash = ts.get("signer_set_hash")?.asString.flatMap({ Base64URLStrict.decode($0) }),
+               let shareMsg = ts.get("share_message")?.asString.flatMap({ Base64URLStrict.decode($0) }) {
+                let signerSet = setArr.compactMap { s -> Threshold.Signer? in
+                    guard let r = s.get("role")?.asString, let role = Threshold.Role(rawValue: r),
+                          let pk = s.get("publicKey")?.asString else { return nil }
+                    return Threshold.Signer(role: role, publicKey: pk)
+                }
+                if Threshold.signerSetHash(signerSet) != setHash { failures.append("\(name): signerSetHash mismatch") }
+                if Threshold.shareMessage(role, msg, signerSet, Int(t)) != shareMsg { failures.append("\(name): shareMessage mismatch") }
+            } else {
+                failures.append("\(name): malformed threshold_share vector")
             }
-            let signerSet = setArr.compactMap { s -> Threshold.Signer? in
-                guard let r = s.get("role")?.asString, let role = Threshold.Role(rawValue: r),
-                      let pk = s.get("publicKey")?.asString else { return nil }
-                return Threshold.Signer(role: role, publicKey: pk)
+
+            // the fail-closed v2.1 verdict.
+            let got = Threshold.verifyShare(ts)
+            if got != want { failures.append("\(name): share verified = \(got), want valid = \(want)") }
+            if want { accepted += 1 } else { rejected += 1 }
+            if name == "agent-bare-rejected" && !got { bareRejected = true }
+            if name == "agent-bound-wrong-set" && !got { wrongSetRejected = true }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        XCTAssertTrue(bareRejected, "v2.1 binding: the pre-v2.1 bare agent share (agent-bare-rejected) MUST be rejected")
+        XCTAssertTrue(wrongSetRejected, "v2.1 binding: a cross-signer-set agent share replay (agent-bound-wrong-set) MUST be rejected")
+        print("PCA threshold shares: \(accepted) valid accepted, \(rejected) invalid rejected "
+            + "(incl. v2.1 bare-agent-share + cross-signer-set replay)")
+    }
+
+    /// The post-quantum transparency / authority artifacts (`primitives.pq_artifact[]`) — `sth`, `revocation`,
+    /// `beacon`, `bond-settlement`, `safety-certificate`, `judge-verdict`, `software-attestation`. They route
+    /// through the SAME `PQ.verifyLeaf` agility seam as the leaf, so an IMPLEMENTED suite yields a genuine
+    /// verdict (signature over `message` under the suite `alg` must equal `valid`) and an unimplemented suite
+    /// is skipped EXPLICITLY, per suite.
+    func testPQArtifact() throws {
+        let doc = try Self.load("vectors.json")
+        guard let arts = doc.get("primitives")?.get("pq_artifact")?.asArray, !arts.isEmpty else {
+            return XCTFail("no pq_artifact primitives")
+        }
+        var failures: [String] = []
+        var ran = 0
+        var skippedBySuite: [String: Int] = [:]
+        for a in arts {
+            let alg = a.get("alg")?.asString ?? "ed25519"
+            let artifact = a.get("artifact")?.asString ?? "?"
+            if !Self.SUPPORTED_SUITES.contains(alg) {
+                skippedBySuite[alg, default: 0] += 1
+                continue
             }
-            XCTAssertEqual(Threshold.signerSetHash(signerSet), setHash, "signerSetHash for role \(roleStr)")
-            XCTAssertEqual(Threshold.shareMessage(role, msg, signerSet, Int(t)), shareMsg, "shareMessage for role \(roleStr)")
+            guard let msg = a.get("message")?.asString.flatMap({ Base64URLStrict.decode($0) }) else {
+                failures.append("\(artifact)/\(alg): message not canonical base64url"); continue
+            }
+            let edPub = a.get("ed_pub")?.asString ?? ""
+            let got = PQ.verifyLeaf(alg: alg, holder: edPub, pqPublicKey: a.get("pq_pk")?.asString,
+                                    message: msg, sig: a.get("sig")?.asString, pqSig: a.get("pq_sig")?.asString)
+            let want: Bool = { if case let .bool(b)? = a.get("valid") { return b }; return true }()
+            if got != want { failures.append("\(artifact)/\(alg): verified = \(got), want \(want)") }
+            ran += 1
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        print("PCA pq artifacts: ran \(ran), skipped \(skippedBySuite.values.reduce(0, +))")
+        for s in skippedBySuite.keys.sorted() {
+            print("  skipped \(skippedBySuite[s]!) pq artifact(s) under unimplemented suite \"\(s)\"")
         }
     }
 

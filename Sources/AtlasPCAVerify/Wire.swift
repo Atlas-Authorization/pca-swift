@@ -92,11 +92,14 @@ enum Wire {
         guard let chain = p["cap_chain"]?.asArray else { return "'cap_chain' must be an array" }
         for (i, cv) in chain.enumerated() {
             guard let c = cv.asObject else { return "cap_chain[\(i)] must be an object" }
-            if let e = closed(c, ["id", "issuer", "holder", "body_digest", "caveats", "sig", "parent"], "cap_chain[\(i)].") { return e }
+            if let e = closed(c, ["id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig"], "cap_chain[\(i)].") { return e }
             for k in ["id", "issuer", "holder", "body_digest"] where !b32(c[k]) {
                 return "cap_chain[\(i)].\(k) is not canonical base64url (32 bytes)"
             }
-            if !b64sig(c["sig"]) { return "cap_chain[\(i)].sig is not canonical base64url (64 bytes)" }
+            // B4 crypto-agility: validate the hop's `alg`/`sig`/`pq_pk`/`pq_sig` per suite, exactly as the
+            // leaf. Absent `alg` asserts a 64-byte `sig` and that `pq_pk`/`pq_sig` are absent (byte-identical
+            // to the classical pre-B4 hop).
+            if let e = PQ.validateSignatureWire(c) { return "cap_chain[\(i)]: \(e)" }
             if let par = c["parent"], !b32(par) { return "cap_chain[\(i)].parent is not canonical base64url (32 bytes)" }
             let ok = (c["caveats"]?.asArray)?.allSatisfy { ($0.asObject.map { isStr($0["type"]) }) ?? false } ?? false
             if !ok { return "cap_chain[\(i)].caveats must be an array of {type,...} objects" }
