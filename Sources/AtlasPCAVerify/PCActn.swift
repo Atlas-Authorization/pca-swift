@@ -110,6 +110,14 @@ public enum PCA {
             checks["chain"] = true
         }
 
+        // grant_ref_bound (normative): the signed grant_ref MUST be a non-empty string byte-equal to the id of the
+        // ROOT capability of the presented chain (cap_chain[0].id). Independent of the chain verdict; fail-closed
+        // on an empty / malformed chain. Replay state is keyed on grant_ref, so it must not be attacker-chosen.
+        let grantRef = p["grant_ref"]?.asString
+        let rootId = chain.first?.asObject?["id"]?.asString
+        record("grant_ref_bound", grantRef != nil && !(grantRef ?? "").isEmpty && grantRef == rootId,
+               "grant_ref is not the id of the root capability in cap_chain")
+
         // plan inclusion (leaf recomputed from the action itself)
         let plan = p["plan"]?.asObject ?? [:]
         let action = p["action"]?.asObject
