@@ -1,0 +1,40 @@
+name: CI
+
+# swift build + swift test on macOS (CryptoKit): AtlasPCAVerify (incl. the shared conformance corpus,
+# ConformanceTests.swift over conformance/vectors.json) and AtlasPCAStepUp. The ML-DSA path uses CryptoKit's MLDSA65,
+# so compiling needs the Xcode 26 SDK; macos-15 runs the same build on an older OS (runtime availability checks).
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: swift test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Toolchain
+        run: swift --version && xcodebuild -version && sw_vers
+      - name: Build
+        run: swift build
+      - name: Tests + conformance corpus
+        run: swift test
