@@ -47,7 +47,6 @@ struct BigUInt: Comparable, Equatable {
     }
 
     var isZero: Bool { limbs.isEmpty }
-    var isEven: Bool { limbs.isEmpty || (limbs[0] & 1) == 0 }
 
     /// Number of significant bits (0 for zero).
     var bitLength: Int {
@@ -130,32 +129,6 @@ struct BigUInt: Comparable, Equatable {
             out[i + limbShift] |= UInt32(v & 0xffff_ffff)
             out[i + limbShift + 1] |= UInt32(v >> 32)
         }
-        return BigUInt(normalizing: out)
-    }
-
-    static func >> (a: BigUInt, bits: Int) -> BigUInt {
-        if a.isZero || bits == 0 { return a }
-        let limbShift = bits >> 5
-        if limbShift >= a.limbs.count { return BigUInt() }
-        let bitShift = UInt32(bits & 31)
-        var out = [UInt32](repeating: 0, count: a.limbs.count - limbShift)
-        for i in 0..<out.count {
-            var v = UInt64(a.limbs[i + limbShift]) >> UInt64(bitShift)
-            if bitShift != 0 && (i + limbShift + 1) < a.limbs.count {
-                v |= UInt64(a.limbs[i + limbShift + 1]) << UInt64(32 - bitShift)
-            }
-            out[i] = UInt32(v & 0xffff_ffff)
-        }
-        return BigUInt(normalizing: out)
-    }
-
-    /// Low `n` bits (value mod 2^n).
-    func maskBits(_ n: Int) -> BigUInt {
-        let limbCount = (n + 31) >> 5
-        if limbCount >= limbs.count { return self }
-        var out = Array(limbs[0..<limbCount])
-        let rem = n & 31
-        if rem != 0 { out[limbCount - 1] &= (UInt32(1) << UInt32(rem)) - 1 }
         return BigUInt(normalizing: out)
     }
 }

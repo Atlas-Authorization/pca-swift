@@ -28,24 +28,24 @@ enum Wire {
     private static func isStr(_ v: JSONValue?) -> Bool { v?.asString != nil }
     private static func isInt(_ v: JSONValue?) -> Bool { v?.safeInt != nil }
 
-    private static func closed(_ o: [String: JSONValue], _ allowed: [String], _ label: String) -> String? {
-        for k in o.keys where !allowed.contains(k) { return "unknown field '\(label)\(k)'" }
+    private static func closed(_ o: JObject, _ allowed: [String], _ label: String) -> String? {
+        for k in o.keys where !allowed.contains(where: { JKey($0) == k }) { return "unknown field '\(label)\(k.s)'" }
         return nil
     }
 
     static func validate(_ pcactn: JSONValue) -> String? {
         guard let p = pcactn.asObject else { return "PCActn is not an object" }
-        for k in p.keys where !REQUIRED_FIELDS.contains(k) && !OPTIONAL_FIELDS.contains(k) {
-            return "unknown field '\(k)'"
+        for k in p.keys where !REQUIRED_FIELDS.contains(where: { JKey($0) == k }) && !OPTIONAL_FIELDS.contains(where: { JKey($0) == k }) {
+            return "unknown field '\(k.s)'"
         }
-        for k in REQUIRED_FIELDS where p[k] == nil { return "missing field '\(k)'" }
+        for k in REQUIRED_FIELDS where p[JKey(k)] == nil { return "missing field '\(k)'" }
 
         // every signed byte must be strict-canonical-encodable; `sig`, `threshold` and `pq_sig` are unsigned.
-        var body: [String: JSONValue] = [:]
+        var body: JObject = [:]
         for (k, v) in p where k != "sig" && k != "threshold" && k != "pq_sig" { body[k] = v }
         do { _ = try Canonical.canonicalizeStrict(.object(body)) } catch { return "\(error)" }
 
-        for k in ["ver", "counter", "iat", "exp"] where !isInt(p[k]) { return "'\(k)' must be a safe integer" }
+        for k in ["ver", "counter", "iat", "exp"] where !isInt(p[JKey(k)]) { return "'\(k)' must be a safe integer" }
 
         if let a = p["aud"]?.asString, !a.isEmpty, a.utf8.count <= MAX_AUD_LEN {} else {
             return "'aud' must be a non-empty string"
@@ -92,14 +92,15 @@ enum Wire {
         guard let chain = p["cap_chain"]?.asArray else { return "'cap_chain' must be an array" }
         for (i, cv) in chain.enumerated() {
             guard let c = cv.asObject else { return "cap_chain[\(i)] must be an object" }
-            if let e = closed(c, ["id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig"], "cap_chain[\(i)].") { return e }
-            for k in ["id", "issuer", "holder", "body_digest"] where !b32(c[k]) {
+            if let e = closed(c, ["id", "issuer", "holder", "body_digest", "caveats", "sig", "parent", "alg", "pq_pk", "pq_sig", "holder_pq"], "cap_chain[\(i)].") { return e }
+            for k in ["id", "issuer", "holder", "body_digest"] where !b32(c[JKey(k)]) {
                 return "cap_chain[\(i)].\(k) is not canonical base64url (32 bytes)"
             }
             // B4 crypto-agility: validate the hop's `alg`/`sig`/`pq_pk`/`pq_sig` per suite, exactly as the
             // leaf. Absent `alg` asserts a 64-byte `sig` and that `pq_pk`/`pq_sig` are absent (byte-identical
             // to the classical pre-B4 hop).
             if let e = PQ.validateSignatureWire(c) { return "cap_chain[\(i)]: \(e)" }
+            if let hp = c["holder_pq"], !b32(hp) { return "cap_chain[\(i)].holder_pq is not canonical base64url (32 bytes)" }
             if let par = c["parent"], !b32(par) { return "cap_chain[\(i)].parent is not canonical base64url (32 bytes)" }
             let ok = (c["caveats"]?.asArray)?.allSatisfy { ($0.asObject.map { isStr($0["type"]) }) ?? false } ?? false
             if !ok { return "cap_chain[\(i)].caveats must be an array of {type,...} objects" }

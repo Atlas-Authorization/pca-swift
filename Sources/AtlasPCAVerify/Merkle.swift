@@ -51,7 +51,7 @@ enum Merkle {
     }
 
     /// Never throws; malformed proofs return false. `index`/`size` are bound to the path shape.
-    static func verifyInclusion(_ root: String, _ proof: [String: JSONValue]?, _ leaf: JSONValue) -> Bool {
+    static func verifyInclusion(_ root: String, _ proof: JObject?, _ leaf: JSONValue) -> Bool {
         guard let proof = proof,
               let path = proof["path"]?.asArray,
               let index = proof["index"]?.safeInt,
@@ -81,9 +81,9 @@ enum Merkle {
     }
 
     /// Recompute the committed plan leaf for an action (the verifier never trusts the carried leaf).
-    static func planLeaf(_ nodeId: JSONValue?, _ action: [String: JSONValue]?, _ cond: String) -> JSONValue? {
+    static func planLeaf(_ nodeId: JSONValue?, _ action: JObject?, _ cond: String) -> JSONValue? {
         guard let nodeId = nodeId, !nodeId.isNull else { return nil }
-        func get(_ k: String) -> JSONValue { action?[k] ?? .null }
+        func get(_ k: String) -> JSONValue { action?[JKey(k)] ?? .null }
         let pd: JSONValue
         if case .null = get("params_digest") { pd = .string(paramsDigest(nil)) } else { pd = get("params_digest") }
         let rc: JSONValue

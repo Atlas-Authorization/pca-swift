@@ -24,6 +24,7 @@ enum StrictJSON {
     /// string VALUES byte-for-byte — unlike `JSONSerialization`, which silently strips a leading U+FEFF from a
     /// string value and would corrupt the raw `pcactn_json` of the BOM vector. Numbers are classified by
     /// lexeme (integer → `.int`, fractional/exponent → `.double`), avoiding `NSNumber` int/double guesswork.
+    /// Nesting is bounded by `Canonical.MAX_LENIENT_DEPTH` (a clean error, never a stack overflow).
     static func parseLenient(_ text: String) throws -> JSONValue {
         var p = Parser(b: Array(text.utf8), lenient: true)
         let v = try p.value(1)
@@ -186,20 +187,21 @@ enum StrictJSON {
             guard let ch = peek() else { throw err("unexpected end of input") }
             switch ch {
             case 0x7b: // '{'
-                if !lenient && depth > Canonical.MAX_JSON_DEPTH { throw err("nesting too deep") }
+                if depth > (lenient ? Canonical.MAX_LENIENT_DEPTH : Canonical.MAX_JSON_DEPTH) { throw err("nesting too deep") }
                 i += 1
-                var o: [String: JSONValue] = [:]
+                var o: JObject = [:]
                 ws()
                 if peek() == 0x7d { i += 1; return .object(o) }
                 while true {
                     ws()
                     if peek() != 0x22 { throw err("expected a string key") }
                     let k = try string()
-                    if o[k] != nil { throw err("duplicate key") }
+                    let jk = JKey(k)
+                    if o[jk] != nil { throw err("duplicate key") }
                     ws()
                     if peek() != 0x3a { throw err("expected \":\"") }
                     i += 1
-                    o[k] = try value(depth + 1)
+                    o[jk] = try value(depth + 1)
                     ws()
                     switch peek() {
                     case 0x2c: i += 1
@@ -208,7 +210,7 @@ enum StrictJSON {
                     }
                 }
             case 0x5b: // '['
-                if !lenient && depth > Canonical.MAX_JSON_DEPTH { throw err("nesting too deep") }
+                if depth > (lenient ? Canonical.MAX_LENIENT_DEPTH : Canonical.MAX_JSON_DEPTH) { throw err("nesting too deep") }
                 i += 1
                 var a: [JSONValue] = []
                 ws()

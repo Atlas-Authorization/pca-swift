@@ -14,10 +14,9 @@ import CryptoKit
 /// 32-byte key / 64-byte signature bytes.
 ///
 /// The reference verifiers reject small-order AND mixed-order ("torsion") points via a full `[L]·P == O`
-/// scalar multiplication. The entire shared conformance corpus (and the diff-fuzz counterexamples) only
-/// exercises small-order forgeries, so the strict small-order check here is the sign-insensitive set of
-/// small-order point encodings — mathematically exact for order ≤ 8, and far cheaper than a pure-Swift
-/// big-integer scalar multiplication (which is ~1000× slower than the native big-int the other SDKs use).
+/// scalar multiplication; `Ed25519Torsion.isPrimeOrder` does the same here (cached per encoding). A plain
+/// RFC 8032 library accepts a mixed-order key `A + T` (T of order 8) whenever the signature hash k = 0 (mod 8),
+/// which the TypeScript reference rejects, so the full subgroup test is required, not only the small-order table.
 enum Ed25519Strict {
     // Field prime p = 2^255 - 19 and group order L = 2^252 + 27742317777372353535851937790883648493.
     static let P: BigUInt = (BigUInt(1) << 255) - BigUInt(19)
@@ -57,11 +56,18 @@ enum Ed25519Strict {
         return true
     }
 
+    /// True iff the 64-byte signature's S (little-endian bytes 32..<64) is canonical, S < L. A gate of its own (and
+    /// tested as such): the platform Ed25519 also refuses S >= L, which would otherwise hide a broken gate.
+    static func isCanonicalS(_ sig: [UInt8]) -> Bool {
+        guard sig.count == 64 else { return false }
+        return BigUInt(bytesLE: Array(sig[32..<64])) < L
+    }
+
     static func verify(publicKey pk: [UInt8], message msg: [UInt8], signature sig: [UInt8]) -> Bool {
         guard pk.count == 32, sig.count == 64 else { return false }
-        let s = BigUInt(bytesLE: Array(sig[32..<64]))
-        if !(s < L) { return false }                        // non-canonical S (S >= L)
-        if !isStrictPoint(pk) { return false }              // small-order / non-canonical key
+        if !isCanonicalS(sig) { return false }              // non-canonical S (S >= L)
+        if !isStrictPoint(pk) { return false }            // small-order / non-canonical key
+        if !Ed25519Torsion.isPrimeOrder(pk) { return false } // mixed-order key (A + T): CryptoKit's cofactorless check would accept it when k = 0 mod 8
         if !isStrictPoint(Array(sig[0..<32])) { return false } // same for R
         guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(pk)) else { return false }
         return key.isValidSignature(Data(sig), for: Data(msg))

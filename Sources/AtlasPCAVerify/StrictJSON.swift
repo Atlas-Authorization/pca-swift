@@ -7,13 +7,19 @@ import CryptoKit
 enum Canonical {
     static let MAX_SAFE: Int64 = 9_007_199_254_740_991 // 2^53 - 1
     static let MAX_JSON_DEPTH = 32
+    /// Recursion bound of the NON-strict paths (lenient canonicalization of a caller-supplied grant / Merkle leaf and the
+    /// lenient corpus loader). Far above anything signable (the strict profile stops at MAX_JSON_DEPTH), so it never
+    /// changes a verdict; it only turns a stack overflow on a hostile, absurdly deep tree into a clean refusal.
+    static let MAX_LENIENT_DEPTH = 1024
     static let MAX_JSON_BYTES = 1 << 20
     static let MAX_DECIMAL_DIGITS = 15
 
-    /// Sentinel scalar standing in for a lone surrogate that a Swift `String` cannot hold (the conformance
-    /// harness substitutes it when loading object-form vectors; a string carrying it is treated as having a
-    /// lone surrogate — a `wire` failure — exactly as a UTF-16 language reaches via the strict encoder).
-    static let LONE_SURROGATE_SENTINEL: Unicode.Scalar = Unicode.Scalar(0x10FFFF)!
+    /// Sentinel scalar the conformance TEST HARNESS substitutes for a lone surrogate (which a Swift `String` cannot
+    /// hold) when it loads object-form vectors; the harness itself treats a tree carrying it as a `wire` failure.
+    /// It is a Unicode NONCHARACTER (never a legitimate interchange scalar and absent from the corpus). The library
+    /// does NOT interpret it: the strict parser already rejects every lone surrogate in raw text, and an earlier
+    /// version that used U+10FFFF here wrongly rejected a VALID U+10FFFF (`\uDBFF\uDFFF`) in signed content.
+    static let LONE_SURROGATE_SENTINEL: Unicode.Scalar = Unicode.Scalar(0xFDD0)!
 
     static func hasLoneSurrogate(_ s: String) -> Bool {
         s.unicodeScalars.contains(LONE_SURROGATE_SENTINEL)
@@ -26,7 +32,6 @@ enum Canonical {
 
     /// UTF-8 bytewise comparison (== Unicode code point order).
     static func compareUtf8(_ a: String, _ b: String) -> Int {
-        if a == b { return 0 }
         let x = Array(a.utf8), y = Array(b.utf8)
         let n = min(x.count, y.count)
         var i = 0
@@ -53,7 +58,7 @@ enum Canonical {
     }
 
     static func intError(_ i: Int64) -> String? {
-        abs(i) > MAX_SAFE ? "integer outside the safe range" : nil
+        (i < -MAX_SAFE || i > MAX_SAFE) ? "integer outside the safe range" : nil // not abs(): abs(Int64.min) traps
     }
 
     /// The canonical decimal for a double: shortest round-trip (via Swift's `description`) re-rendered as a
@@ -102,9 +107,11 @@ enum Canonical {
     struct CanonicalError: Error { let message: String }
 
     /// Lenient canonical JSON (capability content addressing, Merkle leaves). Never throws for in-profile data.
+    /// Out-of-profile input (non-finite number, nesting deeper than MAX_LENIENT_DEPTH) yields "" (whose hash matches no
+    /// real canonical form), never a truncated prefix that two different trees could share.
     static func canonicalize(_ v: JSONValue) -> String {
         var out = ""
-        try? ser(&out, v, strict: false, depth: 1)
+        do { try ser(&out, v, strict: false, depth: 1) } catch { return "" }
         return out
     }
 
@@ -142,7 +149,6 @@ enum Canonical {
         case .null: out.append("null")
         case let .bool(b): out.append(b ? "true" : "false")
         case let .string(s):
-            if strict && hasLoneSurrogate(s) { throw CanonicalError(message: "canonicalize: lone surrogate in string") }
             jsString(&out, s)
         case let .int(i):
             if strict, let e = intError(i) { throw CanonicalError(message: "canonicalize: \(e)") }
@@ -155,7 +161,7 @@ enum Canonical {
             }
             out.append(numberString(d))
         case let .array(a):
-            if strict && depth > MAX_JSON_DEPTH { throw CanonicalError(message: "canonicalize: nesting too deep") }
+            if depth > (strict ? MAX_JSON_DEPTH : MAX_LENIENT_DEPTH) { throw CanonicalError(message: "canonicalize: nesting too deep") }
             out.append("[")
             for (i, x) in a.enumerated() {
                 if i > 0 { out.append(",") }
@@ -163,13 +169,12 @@ enum Canonical {
             }
             out.append("]")
         case let .object(o):
-            if strict && depth > MAX_JSON_DEPTH { throw CanonicalError(message: "canonicalize: nesting too deep") }
-            let keys = o.keys.sorted { compareUtf8($0, $1) < 0 }
+            if depth > (strict ? MAX_JSON_DEPTH : MAX_LENIENT_DEPTH) { throw CanonicalError(message: "canonicalize: nesting too deep") }
+            let keys = o.keys.sorted { compareUtf8($0.s, $1.s) < 0 }
             out.append("{")
             for (i, k) in keys.enumerated() {
                 if i > 0 { out.append(",") }
-                if strict && hasLoneSurrogate(k) { throw CanonicalError(message: "canonicalize: lone surrogate in key") }
-                jsString(&out, k)
+                jsString(&out, k.s)
                 out.append(":")
                 try ser(&out, o[k]!, strict: strict, depth: depth + 1)
             }

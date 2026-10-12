@@ -37,7 +37,7 @@ enum PQ {
 
     /// Validate the signature-carrying fields (`alg`, `sig`, `pq_pk`, `pq_sig`) per suite (wire.ts seam).
     /// Returns nil when well-formed, else a reason. Strict + fail-closed.
-    static func validateSignatureWire(_ p: [String: JSONValue]) -> String? {
+    static func validateSignatureWire(_ p: JObject) -> String? {
         if let a = p["alg"], a.asString == nil { return "'alg' must be a string" }
         guard let suite = resolve(p["alg"]?.asString) else {
             return "unknown signature alg '\(p["alg"]?.asString ?? "")'"
@@ -62,19 +62,56 @@ enum PQ {
         return nil
     }
 
-    /// Verify the leaf signature under the PCActn's suite. FAIL-CLOSED: unknown alg / missing / invalid → false.
+    /// Verify a signature under the ARTIFACT'S OWN `pq_pk` (CALLER-VOUCHED). Only for surfaces whose key is authorised
+    /// elsewhere (threshold shares, the `pq_artifact` conformance primitives): it proves nothing about who issued the
+    /// artifact. The capability chain and the PCActn leaf never call it; they go through `verifySuite` with a
+    /// `PinnedPQ` from `resolvePqKey`.
     static func verifyLeaf(alg: String?, holder: String, pqPublicKey: String?, message: [UInt8],
                            sig: String?, pqSig: String?) -> Bool {
+        verifySuite(alg: alg, holder: holder,
+                    pq: resolvePqKey(identity: nil, artifactPk: pqPublicKey, trustedPk: pqPublicKey),
+                    message: message, sig: sig, pqSig: pqSig)
+    }
+
+    /// The key-authorised seam. The PQ half verifies ONLY under `pq` (a `PinnedPQ`, minted solely by `resolvePqKey`),
+    /// never under a `pq_pk` read off the artifact. FAIL-CLOSED: unknown alg / missing key / invalid -> false.
+    static func verifySuite(alg: String?, holder: String, pq: PinnedPQ?, message: [UInt8],
+                            sig: String?, pqSig: String?) -> Bool {
         guard let suite = resolve(alg), let sig = sig else { return false }
         switch suite.alg {
         case .ed25519:
             return Ed25519Strict.verifyB64u(holder, message, sig)
         case .mlDsa65:
-            guard let pk = pqPublicKey else { return false }
-            return MLDSA.verifyB64u(pk, message, sig)
+            guard let pq = pq else { return false }
+            return MLDSA.verifyB64u(pq.key, message, sig)
         case .hybrid:
-            guard let pk = pqPublicKey, let pqSig = pqSig else { return false }
-            return Ed25519Strict.verifyB64u(holder, message, sig) && MLDSA.verifyB64u(pk, message, pqSig)
+            guard let pq = pq, let pqSig = pqSig else { return false }
+            return Ed25519Strict.verifyB64u(holder, message, sig) && MLDSA.verifyB64u(pq.key, message, pqSig)
         }
     }
+
+    /// THE choke point (R3-01), mirroring `resolvePqVerifyKey` in packages/pca/src/pq.ts. Returns the key to verify under,
+    /// or nil (REFUSE) when no verifier-side authority vouches for the artifact's `pq_pk`:
+    ///  1. `trustedPk`: a key the verifier itself holds (the stored grant). Used as is.
+    ///  2. `pqPins[identity]` (own entry only): the artifact key MUST equal the pin; a differing pin is a refusal.
+    ///  3. `holderPq`: the artifact key must hash to the signer's committed `holder_pq` (F-2).
+    /// Natives have no allowUnboundPq: an artifact's own key is never enough.
+    static func resolvePqKey(identity: String?, artifactPk: String?, holderPq: String? = nil,
+                             pqPins: [String: String]? = nil, trustedPk: String? = nil) -> PinnedPQ? {
+        if let t = trustedPk, !t.isEmpty { return PinnedPQ(key: t, source: "trusted") }
+        guard let pk = artifactPk, !pk.isEmpty else { return nil }
+        if let pins = pqPins, let id = identity, let pin = pins[id] {
+            return pin == pk ? PinnedPQ(key: pk, source: "pin") : nil
+        }
+        if let hp = holderPq, Capability.holderPqCommitment(pk) == hp { return PinnedPQ(key: pk, source: "holder-commitment") }
+        return nil
+    }
+}
+
+/// An opaque PQ verification key (R3-01 choke point). The initialiser is `fileprivate`: the only producer is
+/// `PQ.resolvePqKey` in this file, so `PQ.verifySuite` cannot be reached with a `pq_pk` read off the artifact being verified.
+struct PinnedPQ {
+    let key: String
+    let source: String
+    fileprivate init(key: String, source: String) { self.key = key; self.source = source }
 }

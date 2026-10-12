@@ -24,12 +24,16 @@ final class ConformanceTests: XCTestCase {
     /// `JSONSerialization` can load the file; object-form vectors carrying the sentinel are treated as a
     /// `wire` failure. Valid surrogate PAIRS (astral chars) and escaped backslashes are left untouched.
     static func sanitizeLoneSurrogates(_ text: String) -> String {
-        let cs = Array(text.unicodeScalars)
+        // Linear byte scan (UTF-8 multi-byte sequences never contain ASCII bytes, so the JSON syntax bytes are unambiguous).
+        // The previous scalar-by-scalar `String.UnicodeScalarView` rebuild was effectively quadratic in debug builds: a 15 MB
+        // corpus took minutes instead of seconds.
+        let bs = Array(text.utf8)
+        let sentinel = Array(String(SENTINEL).utf8)
         func hex(_ at: Int) -> UInt32? {
-            guard at + 4 <= cs.count else { return nil }
+            guard at + 4 <= bs.count else { return nil }
             var v: UInt32 = 0
             for k in 0..<4 {
-                let c = cs[at + k].value
+                let c = UInt32(bs[at + k])
                 let d: UInt32
                 switch c {
                 case 48...57: d = c - 48
@@ -41,37 +45,36 @@ final class ConformanceTests: XCTestCase {
             }
             return v
         }
-        var out = String.UnicodeScalarView()
+        var out = [UInt8](); out.reserveCapacity(bs.count)
         var i = 0
         var inStr = false
-        let bs = Unicode.Scalar(0x5c)!, q = Unicode.Scalar(0x22)!, u = Unicode.Scalar(0x75)!
-        while i < cs.count {
-            let c = cs[i]
+        while i < bs.count {
+            let c = bs[i]
             if !inStr {
-                inStr = (c == q)
+                inStr = (c == 0x22)
                 out.append(c); i += 1
-            } else if c == q {
+            } else if c == 0x22 {
                 inStr = false; out.append(c); i += 1
-            } else if c == bs {
-                if i + 1 < cs.count, cs[i + 1] == u, let hi = hex(i + 2) {
+            } else if c == 0x5c {
+                if i + 1 < bs.count, bs[i + 1] == 0x75, let hi = hex(i + 2) {
                     if (0xD800...0xDBFF).contains(hi) {
-                        let paired = i + 7 < cs.count && cs[i + 6] == bs && cs[i + 7] == u
+                        let paired = i + 11 < bs.count && bs[i + 6] == 0x5c && bs[i + 7] == 0x75
                             && (hex(i + 8).map { (0xDC00...0xDFFF).contains($0) } ?? false)
-                        if paired { out.append(contentsOf: cs[i..<(i + 12)]); i += 12 }
-                        else { out.append(SENTINEL); i += 6 }
+                        if paired { out.append(contentsOf: bs[i..<(i + 12)]); i += 12 }
+                        else { out.append(contentsOf: sentinel); i += 6 }
                     } else if (0xDC00...0xDFFF).contains(hi) {
-                        out.append(SENTINEL); i += 6
+                        out.append(contentsOf: sentinel); i += 6
                     } else {
-                        out.append(contentsOf: cs[i..<min(i + 2, cs.count)]); i += 2
+                        out.append(contentsOf: bs[i..<min(i + 2, bs.count)]); i += 2
                     }
                 } else {
-                    out.append(contentsOf: cs[i..<min(i + 2, cs.count)]); i += 2
+                    out.append(contentsOf: bs[i..<min(i + 2, bs.count)]); i += 2
                 }
             } else {
                 out.append(c); i += 1
             }
         }
-        return String(out)
+        return String(decoding: out, as: UTF8.self)
     }
 
     /// Load JSON with the lenient parser (byte-exact strings, lexeme int/double) after substituting lone
@@ -91,11 +94,38 @@ final class ConformanceTests: XCTestCase {
         try loadText(readText(conformanceDir.appendingPathComponent(name)))
     }
 
+    /// The curated core `vectors.json`; when the env var `PCA_CONFORMANCE_ADV` names an (uncompressed) copy of the FULL
+    /// adversarial set (`gunzip -c packages/pca/conformance/vectors-adversarial.json.gz > $PCA_CONFORMANCE_ADV`), its
+    /// vectors and adversarial primitives are run too (the core's sampled adv-* vectors are replaced by the full set).
+    static func loadCorpus() throws -> JSONValue {
+        if let c = corpusCache { return c }
+        let c = try loadCorpusUncached(); corpusCache = c; return c
+    }
+    static var corpusCache: JSONValue?
+    static func loadCorpusUncached() throws -> JSONValue {
+        let core = try load("vectors.json")
+        guard let path = ProcessInfo.processInfo.environment["PCA_CONFORMANCE_ADV"], !path.isEmpty,
+              case var .object(c) = core,
+              let adv = try? loadText(readText(URL(fileURLWithPath: path))) else { return core }
+        let base = ["json_parse": 54, "b64u": 21, "canonical": 5]
+        var vectors = (c["vectors"]?.asArray ?? []).filter { !($0.get("name")?.asString ?? "").hasPrefix("adv-") }
+        vectors += adv.get("vectors")?.asArray ?? []
+        c["vectors"] = .array(vectors)
+        if case var .object(prim)? = c["primitives"] {
+            for (k, n) in base {
+                let head = Array((prim[JKey(k)]?.asArray ?? []).prefix(n))
+                prim[JKey(k)] = .array(head + (adv.get("primitives")?.get(k)?.asArray ?? []))
+            }
+            c["primitives"] = .object(prim)
+        }
+        return .object(c)
+    }
+
     static func hasSentinel(_ v: JSONValue) -> Bool {
         switch v {
         case let .string(s): return Canonical.hasLoneSurrogate(s)
         case let .array(a): return a.contains(where: hasSentinel)
-        case let .object(o): return o.contains { Canonical.hasLoneSurrogate($0.key) || hasSentinel($0.value) }
+        case let .object(o): return o.contains { Canonical.hasLoneSurrogate($0.key.s) || hasSentinel($0.value) }
         default: return false
         }
     }
@@ -116,7 +146,7 @@ final class ConformanceTests: XCTestCase {
     /// `nil` for core vectors and for vectors that stay entirely within `SUPPORTED_SUITES`.
     static func unsupportedSuite(_ v: JSONValue) -> String? {
         guard let p = v.get("pcactn")?.asObject else { return nil } // raw-json (wire) + core vectors
-        func alg(_ o: [String: JSONValue]) -> String { o["alg"]?.asString ?? "ed25519" }
+        func alg(_ o: JObject) -> String { o["alg"]?.asString ?? "ed25519" }
         switch v.get("requires")?.asString {
         case "pq":
             let a = alg(p)
@@ -138,7 +168,7 @@ final class ConformanceTests: XCTestCase {
     /// Whether the EXPECTED verdict is a terminal `{wire:false}` — a wire failure is suite-AGNOSTIC (an
     /// unknown `alg`, or a `pq_sig` whose size the suite cannot admit, is rejected at the wire stage whether
     /// or not we implement the suite), so these negatives still RUN and pass even for an unimplemented suite.
-    static func terminalWireFalse(_ checks: [String: JSONValue]) -> Bool {
+    static func terminalWireFalse(_ checks: JObject) -> Bool {
         guard checks.count == 1, case .bool(false)? = checks["wire"] else { return false }
         return true
     }
@@ -146,7 +176,7 @@ final class ConformanceTests: XCTestCase {
     // ---- the verdict corpus ----
 
     func testVectors() throws {
-        let doc = try Self.load("vectors.json")
+        let doc = try Self.loadCorpus()
         XCTAssertEqual(doc.get("format")?.safeInt, 2)
         guard let vectors = doc.get("vectors")?.asArray else { return XCTFail("no vectors") }
         XCTAssertFalse(vectors.isEmpty)
@@ -171,23 +201,24 @@ final class ConformanceTests: XCTestCase {
                 continue
             }
             let grant = v.get("grant") ?? .null
+            let allowed: [String]? = v.get("context")?.get("allowed_suites")?.asArray?.compactMap { $0.asString }
 
             let got: PCA.Verdict
             if let raw = v.get("pcactn_json")?.asString {
-                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud)
+                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud, allowedSuites: allowed)
             } else if let obj = v.get("pcactn"), Self.hasSentinel(obj) {
                 got = PCA.Verdict(allow: false, checks: ["wire": false], reason: "wire: lone surrogate")
             } else {
-                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud)
+                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, allowedSuites: allowed)
             }
 
             if got.allow != wantAllow {
                 failures.append("\(name): allow = \(got.allow), want \(wantAllow) (\(got.reason))")
             }
             if got.checks.count != wantChecks.count {
-                failures.append("\(name): checks \(got.checks) want \(wantChecks.keys.sorted())")
+                failures.append("\(name): checks \(got.checks) want \(wantChecks.keys.map { $0.s }.sorted())")
             }
-            for (k, wv) in wantChecks {
+            for (jk, wv) in wantChecks { let k = jk.s
                 let want: Bool? = { if case let .bool(b) = wv { return b }; return nil }()
                 if got.checks[k] != want {
                     failures.append("\(name): check \(k) = \(String(describing: got.checks[k])), want \(String(describing: want)) (\(got.reason))")
@@ -209,7 +240,7 @@ final class ConformanceTests: XCTestCase {
     // ---- primitive tables ----
 
     func testCanonicalAndHash() throws {
-        let doc = try Self.load("vectors.json")
+        let doc = try Self.loadCorpus()
         let prim = doc.get("primitives")!
         var bad: [String] = []
         for c in prim.get("canonical")!.asArray! {
@@ -222,7 +253,7 @@ final class ConformanceTests: XCTestCase {
     }
 
     func testJSONParseTable() throws {
-        let doc = try Self.load("vectors.json")
+        let doc = try Self.loadCorpus()
         var bad: [String] = []
         for t in doc.get("primitives")!.get("json_parse")!.asArray! {
             guard let input = t.get("input")?.asString,
@@ -242,7 +273,7 @@ final class ConformanceTests: XCTestCase {
     }
 
     func testB64uTable() throws {
-        let doc = try Self.load("vectors.json")
+        let doc = try Self.loadCorpus()
         var bad: [String] = []
         for t in doc.get("primitives")!.get("b64u")!.asArray! {
             guard let input = t.get("input")?.asString,
@@ -297,10 +328,10 @@ final class ConformanceTests: XCTestCase {
                 let signerSet = setArr.compactMap { s -> Threshold.Signer? in
                     guard let r = s.get("role")?.asString, let role = Threshold.Role(rawValue: r),
                           let pk = s.get("publicKey")?.asString else { return nil }
-                    return Threshold.Signer(role: role, publicKey: pk)
+                    return Threshold.Signer(role: role, publicKey: pk, pqPk: s.get("pq_pk")?.asString)
                 }
                 if Threshold.signerSetHash(signerSet) != setHash { failures.append("\(name): signerSetHash mismatch") }
-                if Threshold.shareMessage(role, msg, signerSet, Int(t)) != shareMsg { failures.append("\(name): shareMessage mismatch") }
+                if Threshold.shareMessage(role, msg, signerSet, Int(t), alg: ts.get("share")?.get("alg")?.asString) != shareMsg { failures.append("\(name): shareMessage mismatch") }
             } else {
                 failures.append("\(name): malformed threshold_share vector")
             }
@@ -317,6 +348,37 @@ final class ConformanceTests: XCTestCase {
         XCTAssertTrue(wrongSetRejected, "v2.1 binding: a cross-signer-set agent share replay (agent-bound-wrong-set) MUST be rejected")
         print("PCA threshold shares: \(accepted) valid accepted, \(rejected) invalid rejected "
             + "(incl. v2.1 bare-agent-share + cross-signer-set replay)")
+    }
+
+    /// R4-01: the standalone chain API with verifier-side root PQ authority (`primitives.chain_pin[]`). A non-ed25519 ROOT
+    /// needs a pin (`pq_pins`) or the stored grant (`trusted_root`). ed25519, ml-dsa-65 and hybrid are all implemented here,
+    /// so every vector runs; the hop-0 pin refusals are also checked against the exact reason string.
+    func testChainPin() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("chain_pin")?.asArray else { return XCTFail("no chain_pin primitives") }
+        XCTAssertGreaterThanOrEqual(vecs.count, 25)
+        var failures: [String] = []
+        for v in vecs {
+            let name = v.get("name")?.asString ?? "?"
+            guard let chain = v.get("chain")?.asArray, let exp = v.get("expect") else { failures.append("\(name): malformed vector"); continue }
+            var pins: [String: String]? = nil
+            if let o = v.get("pq_pins")?.asObject {
+                var m: [String: String] = [:]
+                for (k, val) in o { m[k.s] = val.asString ?? "" }
+                pins = m
+            }
+            let allowed = v.get("allowed_suites")?.asArray?.compactMap { $0.asString }
+            let got = Capability.verifyChain(chain, expectedRootIssuer: v.get("expected_root_issuer")?.asString,
+                                             allowedSuites: allowed, pqPins: pins, trustedRoot: v.get("trusted_root"))
+            var wantOk = false
+            if case let .bool(b)? = exp.get("ok") { wantOk = b }
+            if (got == nil) != wantOk { failures.append("\(name): ok = \(got == nil), want \(wantOk) (\(got ?? ""))") }
+            if let r = exp.get("reason")?.asString, r.hasPrefix("hop 0: root suite"), got != r {
+                failures.append("\(name): reason \(got ?? "nil"), want \(r)")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        print("PCA chain_pin: \(vecs.count) run of \(vecs.count)")
     }
 
     /// The post-quantum transparency / authority artifacts (`primitives.pq_artifact[]`) — `sth`, `revocation`,
@@ -396,6 +458,145 @@ final class ConformanceTests: XCTestCase {
         } else {
             print("PCA counterexamples: \(entries.count)/\(entries.count) passed")
         }
+    }
+
+    /// Round 6 (gen-conformance-r6.mjs): whole signer-set validation for one share (R6-02, R6-03/R6-04).
+    func testR6ThresholdSet() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("threshold_set")?.asArray else { return XCTFail("no threshold_set primitives") }
+        var failures: [String] = []
+        var ran = 0
+        for v in vecs {
+            let name = v.get("name")?.asString ?? "?"
+            if let req = v.get("requires")?.asString, !Self.SUPPORTED_SUITES.contains(req) { continue }
+            ran += 1
+            var want = false
+            if case let .bool(b)? = v.get("valid") { want = b }
+            let got = Threshold.verifyShare(v)
+            if got != want { failures.append("\(name): verified = \(got), want \(want)") }
+        }
+        XCTAssertGreaterThanOrEqual(ran, 50)
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        print("PCA threshold_set: \(ran) run of \(vecs.count)")
+    }
+
+    /// Round 6: the signer-set hash sorts rows by UTF-8 BYTES and carries pq_pk whenever it is a string (incl. "").
+    func testR6SignerSetHash() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("signer_set_hash")?.asArray else { return XCTFail("no signer_set_hash primitives") }
+        var failures: [String] = []
+        for v in vecs {
+            let name = v.get("name")?.asString ?? "?"
+            let arr = v.get("signer_set")?.asArray ?? []
+            let want = v.get("hash")?.asString.flatMap { Base64URLStrict.decode($0) }
+            if Threshold.signerSetHashJSON(arr) != want { failures.append("\(name): signer-set hash mismatch") }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
+    /// Round 6 (R6-05): every malformed input is a clean deny (Swift has no catchable traps: a crash fails the run).
+    func testR6Malformed() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("malformed")?.asArray else { return XCTFail("no malformed primitives") }
+        XCTAssertGreaterThanOrEqual(vecs.count, 80)
+        var failures: [String] = []
+        for v in vecs {
+            let name = v.get("name")?.asString ?? "?"
+            let input = v.get("input") ?? .null
+            switch v.get("api")?.asString ?? "" {
+            case "chain":
+                let chain = input.get("chain")?.asArray ?? []
+                if Capability.verifyChain(chain, expectedRootIssuer: input.get("expected_root_issuer")?.asString) == nil {
+                    failures.append("\(name): accepted")
+                }
+            case "threshold_share":
+                if Threshold.verifyShare(input) { failures.append("\(name): accepted") }
+            case "pcactn_json":
+                let text = input.get("text")?.asString ?? ""
+                let now = input.get("now")?.safeInt ?? 0
+                let aud = input.get("aud")?.asString ?? ""
+                if PCA.verify(json: text, grant: input.get("grant") ?? .null, now: now, audience: aud).allow {
+                    failures.append("\(name): allowed")
+                }
+            default:
+                failures.append("\(name): unknown api")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
+    /// Depth caps (primitives.depth: limit-1 / limit / limit+1 / far over, per entry point): the verdict must equal the
+    /// reference `valid`, and nothing may crash (Swift traps are not catchable: a stack overflow fails the run).
+    func testDepthVectors() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("depth")?.asArray else {
+            print("PCA depth: no primitives.depth section in vectors.json (nothing to run)")
+            return
+        }
+        var failures: [String] = []
+        var huge = 0
+        for v in vecs {
+            let name = v.get("name")?.asString ?? "?"
+            var input = v.get("input") ?? .null
+            guard case let .bool(want)? = v.get("valid") else { failures.append("\(name): no valid"); continue }
+            if let ex = v.get("expand") {
+                guard let marker = ex.get("marker")?.asString, let levels = ex.get("levels")?.safeInt, let leaf = ex.get("leaf") else {
+                    failures.append("\(name): bad expand"); continue
+                }
+                input = Self.expandDepth(input, marker: marker, levels: Int(levels), leaf: leaf, api: v.get("api")?.asString ?? "")
+                Self.retained.append(input) // never deallocated: a 100000-deep indirect enum would overflow the stack in deinit
+                huge += 1
+            }
+            let got: Bool
+            switch v.get("api")?.asString ?? "" {
+            case "json_parse":
+                let text = input.asString ?? input.get("text")?.asString ?? ""
+                got = (try? StrictJSON.parse(text)) != nil
+            case "chain":
+                let chain = input.get("chain")?.asArray ?? []
+                got = Capability.verifyChain(chain, expectedRootIssuer: input.get("expected_root_issuer")?.asString) == nil
+            case "threshold_share":
+                got = Threshold.verifyShare(input)
+            case "pcactn_json":
+                got = PCA.verify(json: input.get("text")?.asString ?? "", grant: input.get("grant") ?? .null,
+                                 now: input.get("now")?.safeInt ?? 0, audience: input.get("aud")?.asString ?? "").allow
+            default:
+                failures.append("\(name): unknown api"); continue
+            }
+            if got != want { failures.append("\(name): got \(got), want \(want)") }
+        }
+        XCTAssertGreaterThanOrEqual(vecs.count, 29)
+        XCTAssertGreaterThanOrEqual(huge, 5)
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+        print("PCA depth: \(vecs.count - failures.count)/\(vecs.count) passed (\(huge) expanded to ~100000 levels)")
+    }
+
+    /// Huge depth cases stay alive for the whole process (see testDepthVectors).
+    static var retained: [JSONValue] = []
+
+    /// `expand: {marker, levels, leaf}`: for chain / threshold_share replace the STRING value equal to `marker` anywhere in
+    /// `input`; for pcactn_json / json_parse replace the substring `marker` of `input.text`. The replacement is `levels`
+    /// nested arrays around `leaf`, built ITERATIVELY (text, or a JSONValue chain).
+    static func expandDepth(_ input: JSONValue, marker: String, levels: Int, leaf: JSONValue, api: String) -> JSONValue {
+        if api == "pcactn_json" || api == "json_parse" {
+            let leafText = (try? Canonical.canonicalizeStrict(leaf)) ?? Canonical.canonicalize(leaf)
+            let rep = String(repeating: "[", count: levels) + leafText + String(repeating: "]", count: levels)
+            if let t = input.asString { return .string(t.replacingOccurrences(of: marker, with: rep)) }
+            guard var o = input.asObject, let t = o["text"]?.asString else { return input }
+            o["text"] = .string(t.replacingOccurrences(of: marker, with: rep))
+            return .object(o)
+        }
+        var deep = leaf
+        for _ in 0..<levels { deep = .array([deep]) }
+        func sub(_ v: JSONValue) -> JSONValue { // the marker sits at shallow depth in the committed input
+            switch v {
+            case let .string(s) where s == marker: return deep
+            case let .array(a): return .array(a.map(sub))
+            case let .object(o): return .object(o.mapValues(sub))
+            default: return v
+            }
+        }
+        return sub(input)
     }
 
     func testKeysConsistent() throws {

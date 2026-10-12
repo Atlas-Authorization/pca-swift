@@ -1,5 +1,17 @@
 import Foundation
-import CoreFoundation
+
+/// An object key compared and hashed by its exact Unicode SCALARS. Swift's `String` ==/hash use canonical
+/// equivalence (so "\u{e9}" == "e\u{301}"), which would silently MERGE two distinct JSON keys (NFC vs NFD) in a
+/// `[String: _]` dictionary and mis-flag them as duplicates. JSON object keys are compared code point by code point.
+public struct JKey: Hashable, ExpressibleByStringLiteral, Comparable {
+    public let s: String
+    public init(_ s: String) { self.s = s }
+    public init(stringLiteral v: String) { self.s = v }
+    public static func == (a: JKey, b: JKey) -> Bool { a.s.unicodeScalars.elementsEqual(b.s.unicodeScalars) }
+    public func hash(into h: inout Hasher) { for u in s.unicodeScalars { h.combine(u.value) } }
+    public static func < (a: JKey, b: JKey) -> Bool { a.s.utf8.lexicographicallyPrecedes(b.s.utf8) }
+}
+public typealias JObject = [JKey: JSONValue]
 
 /// A JSON value with the number split into `int` (integer lexeme) and `double` (fractional lexeme),
 /// mirroring how the strict parser classifies numbers. Objects are stored as a dictionary; the strict
@@ -12,10 +24,10 @@ public indirect enum JSONValue: Equatable {
     case double(Double)
     case string(String)
     case array([JSONValue])
-    case object([String: JSONValue])
+    case object(JObject)
 
     var asString: String? { if case let .string(s) = self { return s } else { return nil } }
-    var asObject: [String: JSONValue]? { if case let .object(o) = self { return o } else { return nil } }
+    var asObject: JObject? { if case let .object(o) = self { return o } else { return nil } }
     var asArray: [JSONValue]? { if case let .array(a) = self { return a } else { return nil } }
     var isObject: Bool { if case .object = self { return true } else { return false } }
     var isArray: Bool { if case .array = self { return true } else { return false } }
@@ -24,38 +36,18 @@ public indirect enum JSONValue: Equatable {
         switch self { case .int, .double: return true; default: return false }
     }
 
-    func get(_ key: String) -> JSONValue? { asObject?[key] }
+    func get(_ key: String) -> JSONValue? { asObject?[JKey(key)] }
 
     /// A value that is a strictly-valid number AND integer-valued, as a safe Int64 (else nil).
     var safeInt: Int64? {
         switch self {
         case let .int(i):
-            return abs(i) <= Canonical.MAX_SAFE ? i : nil
+            return (i >= -Canonical.MAX_SAFE && i <= Canonical.MAX_SAFE) ? i : nil // not abs(): abs(Int64.min) traps
         case let .double(d):
             guard d.isFinite, d.rounded() == d, abs(d) <= Double(Canonical.MAX_SAFE) else { return nil }
             return Int64(d)
         default:
             return nil
         }
-    }
-
-    /// Convert a `JSONSerialization` object tree into a `JSONValue`. Integers vs. doubles are told apart by
-    /// the `NSNumber` objCType ('q'/'i'/'l' → integer, 'd'/'f' → double); booleans by `CFBooleanGetTypeID`.
-    static func from(foundation any: Any) -> JSONValue {
-        if any is NSNull { return .null }
-        if let num = any as? NSNumber {
-            if CFGetTypeID(num) == CFBooleanGetTypeID() { return .bool(num.boolValue) }
-            let t = String(cString: num.objCType)
-            if t == "f" || t == "d" { return .double(num.doubleValue) }
-            return .int(num.int64Value)
-        }
-        if let s = any as? String { return .string(s) }
-        if let a = any as? [Any] { return .array(a.map { from(foundation: $0) }) }
-        if let o = any as? [String: Any] {
-            var out: [String: JSONValue] = [:]
-            for (k, v) in o { out[k] = from(foundation: v) }
-            return .object(out)
-        }
-        return .null
     }
 }

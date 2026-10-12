@@ -9,6 +9,9 @@ public enum PCA {
     static let SIG_DOMAIN: [UInt8] = Canonical.utf8("atlas-pca/actn/v2") + [0x00]
     static let MAX_LIFETIME_MS: Int64 = 3_600_000
     static let MAX_SKEW_MS: Int64 = 60_000
+    /// Shared raw wire-size cap of a PCActn JSON document (UTF-8 bytes), checked before any parsing.
+    public static let MAX_ARTIFACT_BYTES = 524_288
+    public static let ARTIFACT_SIZE_REASON = "artifact exceeds size limit (max \(MAX_ARTIFACT_BYTES) bytes)"
 
     /// Verdict for the core checks. `checks[name]` is true when it passed. A wire failure is terminal and is
     /// the ONLY entry (`["wire": false]`); otherwise all eight checks are present. `allow` == every check true.
@@ -33,33 +36,35 @@ public enum PCA {
     }
 
     /// SIG_DOMAIN ‖ sha256(strictCanonical(pcactn without `sig`, `threshold` and `pq_sig`)).
-    static func thresholdMessage(_ p: [String: JSONValue]) throws -> [UInt8] {
-        var body: [String: JSONValue] = [:]
+    static func thresholdMessage(_ p: JObject) throws -> [UInt8] {
+        var body: JObject = [:]
         for (k, v) in p where k != "sig" && k != "threshold" && k != "pq_sig" { body[k] = v }
         let canon = try Canonical.canonicalizeStrict(.object(body))
         return SIG_DOMAIN + Canonical.sha256(Canonical.utf8(canon))
     }
 
     /// Verify RAW PCActn text: strict-parse first (a parse failure is a `wire` failure), then the core checks.
-    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: Audience) -> Verdict {
+    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil) -> Verdict {
+        if text.utf8.count > MAX_ARTIFACT_BYTES { return wireFail(ARTIFACT_SIZE_REASON) } // FIRST: before any parsing
         do {
             let v = try StrictJSON.parse(text)
-            return verify(pcactn: v, grant: grant, now: now, audience: audience)
+            return verify(pcactn: v, grant: grant, now: now, audience: audience, allowedSuites: allowedSuites)
         } catch {
             return wireFail("\(error)")
         }
     }
 
     /// Convenience: concrete audience id (as the conformance harness and the other verifiers use).
-    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: String) -> Verdict {
-        verify(json: text, grant: grant, now: now, audience: .id(audience))
+    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil) -> Verdict {
+        verify(json: text, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites)
     }
 
-    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: String) -> Verdict {
-        verify(pcactn: pcactn, grant: grant, now: now, audience: .id(audience))
+    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil) -> Verdict {
+        verify(pcactn: pcactn, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites)
     }
 
-    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience) -> Verdict {
+    /// `allowedSuites`: optional verifier suite policy (nil = none; an empty list refuses everything). Absent `alg` == "ed25519".
+    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil) -> Verdict {
         if let why = Wire.validate(pcactn) { return wireFail(why) }
         guard let p = pcactn.asObject else { return wireFail("PCActn is not an object") }
 
@@ -84,7 +89,8 @@ public enum PCA {
         case .unset:
             record("audience", !hasAud, "PCActn carries a signed aud but this verifier supplied no audience")
         case let .id(expected):
-            record("audience", aud == expected, "aud does not match this resource server / instance")
+            // scalar-exact: Swift String == is canonical-equivalence (NFC "\u{e9}" == NFD "e\u{301}"), JSON strings compare code point by code point
+            record("audience", aud.map { $0.unicodeScalars.elementsEqual(expected.unicodeScalars) } ?? false, "aud does not match this resource server / instance")
         }
 
         // validity
@@ -102,9 +108,11 @@ public enum PCA {
             record("chain", false, "empty chain")
         } else if chain.count > Capability.MAX_CHAIN_DEPTH {
             record("chain", false, "chain too long (max \(Capability.MAX_CHAIN_DEPTH) hops)")
+        } else if Capability.caveatLimitExceeded(chain) {
+            record("chain", false, Capability.CAVEAT_LIMIT_REASON) // before any hashing or signature work
         } else if Capability.capHash(chain[0]) != Capability.capHash(grant) {
             record("chain", false, "chain root is not the grant")
-        } else if let e = Capability.verifyChain(chain, expectedRootIssuer: grant.get("issuer")?.asString) {
+        } else if let e = Capability.verifyChain(chain, expectedRootIssuer: grant.get("issuer")?.asString, allowedSuites: allowedSuites, trustedRoot: grant) /* chain[0] == grant was checked above */ {
             record("chain", false, e)
         } else {
             checks["chain"] = true
@@ -130,12 +138,19 @@ public enum PCA {
         // leaf signature over the v2 signed message, under the PCActn's signature suite (B4 crypto-agility):
         // ed25519 (strict Ed25519 under the leaf holder), ml-dsa-65 (under pq_pk), or hybrid (BOTH).
         var sigOk = false
-        if let leafCap = chain.last?.asObject, let holder = leafCap["holder"]?.asString,
+        var leafWhy = "signature does not verify under the leaf holder key"
+        if let leafCap = chain.last?.asObject,
+           let e = Capability.suitePolicyError(p["alg"]?.asString, "leaf", allowedSuites)
+                ?? Capability.pqBindingError(p, committed: leafCap["holder_pq"]?.asString, label: "leaf") {
+            leafWhy = e
+        } else if let leafCap = chain.last?.asObject, let holder = leafCap["holder"]?.asString,
            let msg = try? thresholdMessage(p) {
-            sigOk = PQ.verifyLeaf(alg: p["alg"]?.asString, holder: holder, pqPublicKey: p["pq_pk"]?.asString,
-                                  message: msg, sig: p["sig"]?.asString, pqSig: p["pq_sig"]?.asString)
+            sigOk = PQ.verifySuite(alg: p["alg"]?.asString, holder: holder,
+                                   pq: PQ.resolvePqKey(identity: holder, artifactPk: p["pq_pk"]?.asString,
+                                                       holderPq: leafCap["holder_pq"]?.asString),
+                                   message: msg, sig: p["sig"]?.asString, pqSig: p["pq_sig"]?.asString)
         }
-        record("leaf_signature", sigOk, "signature does not verify under the leaf holder key")
+        record("leaf_signature", sigOk, leafWhy)
 
         // counter: safe integer >= 0
         let counterOk = (p["counter"]?.safeInt).map { $0 >= 0 } ?? false
