@@ -38,6 +38,17 @@ enum PQ {
     /// Validate the signature-carrying fields (`alg`, `sig`, `pq_pk`, `pq_sig`) per suite (wire.ts seam).
     /// Returns nil when well-formed, else a reason. Strict + fail-closed.
     static func validateSignatureWire(_ p: JObject) -> String? {
+        validateSuiteFields(p, checkPqPk: true)
+    }
+
+    /// 0.4.1: a threshold share's `alg`/`sig`/`pq_sig` per suite, exactly like the leaf (absent `alg` == ed25519: a 64-byte
+    /// `sig` and no `pq_sig`), EXCEPT `pq_pk`: on a share it is an optional echo judged by `Threshold.verifyShare` against the
+    /// signer set, so the wire does not look at it. Mirrors `validateShareSignatureWire` in pq.ts.
+    static func validateShareSignatureWire(_ s: JObject) -> String? {
+        validateSuiteFields(s, checkPqPk: false)
+    }
+
+    private static func validateSuiteFields(_ p: JObject, checkPqPk: Bool) -> String? {
         if let a = p["alg"], a.asString == nil { return "'alg' must be a string" }
         guard let suite = resolve(p["alg"]?.asString) else {
             return "unknown signature alg '\(p["alg"]?.asString ?? "")'"
@@ -45,7 +56,9 @@ enum PQ {
         guard let sig = p["sig"]?.asString, Base64URLStrict.isValid(sig, length: suite.sigBytes) else {
             return "'sig' is not canonical base64url (\(suite.sigBytes) bytes) for alg '\(suite.alg.rawValue)'"
         }
-        if suite.needsPqPk {
+        if !checkPqPk {
+            // share: `pq_pk` is an optional echo, judged by Threshold.verifyShare against the signer set
+        } else if suite.needsPqPk {
             guard let pk = p["pq_pk"]?.asString, Base64URLStrict.isValid(pk, length: ML_DSA_65_PUBLIC_KEY_BYTES) else {
                 return "'pq_pk' is not canonical base64url (\(ML_DSA_65_PUBLIC_KEY_BYTES) bytes)"
             }

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 - 2026-10-12
+
+- Security (policy layer): caveats on the root grant outside the envelope are now evaluated like delegated caveats; new policy_caveats/evaluate_caveats helpers (incl. max_spend). The core verifier still does not evaluate caveats. Swift API: `PCA.policyCaveats(grant:chain:)` and `PCA.evaluateCaveats(_:context:)` (returns `(ok: Bool, failed: [String])`; total, fail-closed on unknown types; `max_spend`, `expires`, `not_before`, `rate`, `max_blast_radius`, `reversibility_max`, `delegation_depth`, `budget_alloc`). `PCA.verify` still does not evaluate caveats. Corpus: `primitives.caveat_eval` (41) in `R041CaveatConformanceTests`.
+- Threshold share signatures are validated per suite at the wire stage (was a fixed 64 bytes): absent `alg` = ed25519 (64-byte `sig`, no `pq_sig`), `ml-dsa-65` (3309-byte `sig`, no `pq_sig`), `hybrid-ed25519-ml-dsa-65` (64-byte `sig` + required 3309-byte `pq_sig`); a non-string / null / unknown `alg` is a wire failure; a share's `pq_pk` is not judged by the wire (`Threshold.verifyShare` owns it). A pure ML-DSA-65 share can now be carried. Corpus: 20 `r041-share-*` vectors; `ConformanceTests` skips a vector whose `requires` names a suite Swift does not implement (`ml-dsa-87`, `slh-dsa-sha2-128f`).
+- PCA-Action header: not applicable (this package has no HTTP middleware).
+- Version: Package.swift carries no version (SwiftPM uses the git tag); this entry is 0.4.1. Built and tested on Linux (Swift 6.0.3, swift-crypto + liboqs via `tools/pca-audit/swift-mutate/linux-prep.sh`).
+
 ## Unreleased (BREAKING)
 
 - Parity (depth caps): a capability hop's body digest is now computed over the STRICT canonical form, like the reference (`hashCanonical` in hash.ts is strict). A hop body nested deeper than 32 levels (or otherwise outside the strict profile) is refused with `hop N: malformed body`; it was hashed leniently before (shared vector `depth-chain-34`). The non-strict paths (lenient canonicalization of a caller-supplied grant / Merkle leaf, the corpus loader `parseLenient`) are bounded at `Canonical.MAX_LENIENT_DEPTH` = 1024 instead of recursing without limit, and lenient canonicalization of an out-of-profile value now yields "" instead of a truncated prefix. The unused recursive `JSONValue.from(foundation:)` is removed. Shared `primitives.depth` vectors (31 / 32 / 33 / 100000 levels on every entry point) run in `ConformanceTests.testDepthVectors`.

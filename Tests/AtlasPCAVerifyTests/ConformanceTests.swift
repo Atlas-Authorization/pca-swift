@@ -161,6 +161,8 @@ final class ConformanceTests: XCTestCase {
             }
             return nil
         default:
+            // 0.4.1: a vector that names one concrete suite (`requires: "ml-dsa-87"`, `"slh-dsa-sha2-128f"`) Swift lacks.
+            if let req = v.get("requires")?.asString, !req.isEmpty, !SUPPORTED_SUITES.contains(req) { return req }
             return nil
         }
     }

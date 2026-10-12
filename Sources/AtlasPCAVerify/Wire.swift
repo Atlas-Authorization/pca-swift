@@ -21,10 +21,6 @@ enum Wire {
         guard let s = v?.asString else { return false }
         return Base64URLStrict.isValid(s, length: 32)
     }
-    private static func b64sig(_ v: JSONValue?) -> Bool {
-        guard let s = v?.asString else { return false }
-        return Base64URLStrict.isValid(s, length: 64)
-    }
     private static func isStr(_ v: JSONValue?) -> Bool { v?.asString != nil }
     private static func isInt(_ v: JSONValue?) -> Bool { v?.safeInt != nil }
 
@@ -146,7 +142,9 @@ enum Wire {
             for (i, sv) in shares.enumerated() {
                 guard let s = sv.asObject, isStr(s["role"]) else { return "threshold.shares[\(i)] is malformed" }
                 if !b32(s["publicKey"]) { return "threshold.shares[\(i)].publicKey is not canonical base64url (32 bytes)" }
-                if !b64sig(s["sig"]) { return "threshold.shares[\(i)].sig is not canonical base64url (64 bytes)" }
+                // 0.4.1: the share signature is validated PER SUITE (it used to be a fixed 64 bytes, so a pure post-quantum
+                // share could never be carried).
+                if let err = PQ.validateShareSignatureWire(s) { return "threshold.shares[\(i)]: \(err)" }
             }
         }
         return nil
