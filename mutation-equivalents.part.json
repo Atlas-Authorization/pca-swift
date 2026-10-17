@@ -1,0 +1,308 @@
+[
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "+->- => if let last = out.last, x.0 <= last.1 - 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "line": "if let last = out.last, x.0 <= last.1 + 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "occurrence": 1,
+  "lineno": 49,
+  "reason": "adjacent/touching ranges left unmerged leave the membership of has() unchanged: the binary search over sorted disjoint-or-touching ranges and complement() (which only needs a > next) give the same sets"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => if let last = out.last, x.0 <= last.1 + 0 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "line": "if let last = out.last, x.0 <= last.1 + 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "occurrence": 1,
+  "lineno": 49,
+  "reason": "same: ranges that merely touch (gap 0) stay separate; membership and complement are unchanged"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => if let last = out.last, x.0 <= last.1 + 1 { out[out.count - 0].1 = max(last.1, x.1) } else { out.append(x) }",
+  "line": "if let last = out.last, x.0 <= last.1 + 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "occurrence": 1,
+  "lineno": 49,
+  "reason": "same: ranges that merely touch (gap 0) stay separate; membership and complement are unchanged"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "<=->< => if let last = out.last, x.0 < last.1 + 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "line": "if let last = out.last, x.0 <= last.1 + 1 { out[out.count - 1].1 = max(last.1, x.1) } else { out.append(x) }",
+  "occurrence": 1,
+  "lineno": 49,
+  "reason": "x.0 < last.1 + 1 is x.0 <= last.1: only the pure-adjacent case (x.0 == last.1 + 1) stays unmerged; membership and complement are unchanged"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">->>= => if a >= next { out.append((next, a - 1)) }",
+  "line": "if a > next { out.append((next, a - 1)) }",
+  "occurrence": 1,
+  "lineno": 58,
+  "reason": "a == next only when a range starts at 0, and no class escape set (\\d \\w \\s) does, so the equal case is unreachable"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "<=->< => if next < 0xffff { out.append((next, 0xffff)) }",
+  "line": "if next <= 0xffff { out.append((next, 0xffff)) }",
+  "occurrence": 1,
+  "lineno": 61,
+  "reason": "next == 0xffff would need a range ending at 0xfffe; no class escape set does, so the case is unreachable"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "<-><= => let s = r.sorted { $0.0 <= $1.0 }",
+  "line": "let s = r.sorted { $0.0 < $1.0 }",
+  "occurrence": 1,
+  "lineno": 46,
+  "reason": "ranges with equal starts merge through max(last.1, x.1), so their relative order after the sort is irrelevant"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">->>= => if prog.count >= MAX_NFA_INSTRUCTIONS || depth > MAX_PARSE_DEPTH * 2 { throw Refuse() }",
+  "line": "if prog.count > MAX_NFA_INSTRUCTIONS || depth > MAX_PARSE_DEPTH * 2 { throw Refuse() }",
+  "occurrence": 1,
+  "lineno": 281,
+  "reason": "prog.count == 4096 at an emit entry always ends at a final count > 4096 (the match instruction is appended), which compile() refuses either way"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">->>= => if prog.count >= MAX_NFA_INSTRUCTIONS { throw Refuse() }",
+  "line": "if prog.count > MAX_NFA_INSTRUCTIONS { throw Refuse() }",
+  "occurrence": 1,
+  "lineno": 326,
+  "reason": "a program of exactly 4096 instructions after a repeat gets the match instruction appended and is refused by the final size check either way"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->2 => var mark = [Int](repeating: -2, count: prog.count)",
+  "line": "var mark = [Int](repeating: -1, count: prog.count)",
+  "occurrence": 1,
+  "lineno": 349,
+  "reason": "any negative sentinel differs from every epoch (epochs start at 1)"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => var mark = [Int](repeating: -0, count: prog.count)",
+  "line": "var mark = [Int](repeating: -1, count: prog.count)",
+  "occurrence": 1,
+  "lineno": 349,
+  "reason": "the sentinel 0 differs from every epoch because epoch is incremented to 1 before the first add()"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "0->1 => var epoch = 1",
+  "line": "var epoch = 0",
+  "occurrence": 1,
+  "lineno": 350,
+  "reason": "epoch only has to be unique per step and different from the -1 sentinel; starting at 1 changes neither"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "true->false => stack.removeAll(keepingCapacity: false)",
+  "line": "stack.removeAll(keepingCapacity: true)",
+  "occurrence": 1,
+  "lineno": 354,
+  "reason": "keepingCapacity is a performance hint only"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "true->false => nlist.removeAll(keepingCapacity: false)",
+  "line": "nlist.removeAll(keepingCapacity: true)",
+  "occurrence": 1,
+  "lineno": 376,
+  "reason": "keepingCapacity is a performance hint only"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->2 => epoch += 2",
+  "line": "epoch += 1",
+  "occurrence": 1,
+  "lineno": 371,
+  "reason": "the epoch only has to be unique per step; a stride of 2 is just as unique"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => epoch += 0",
+  "line": "epoch += 1",
+  "occurrence": 1,
+  "lineno": 371,
+  "reason": "the first epoch value 0 differs from the -1 sentinel and from every later epoch; uniqueness is preserved"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->2 => epoch += 2",
+  "line": "epoch += 1",
+  "occurrence": 2,
+  "lineno": 375,
+  "reason": "the epoch only has to be unique per step; a stride of 2 is just as unique"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => let n = src[i + 0]",
+  "line": "let n = src[i + 1]",
+  "occurrence": 1,
+  "lineno": 401,
+  "reason": "backreference escapes (\\1-\\9, \\k) are refused by compile() as unknown alphanumeric escapes, and isSafeSource ends with compile(src) != nil, so the verdict is the same"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "<=->< => if (n >= 0x31 && n < 0x39) || n == 0x6b { return false } // backreference",
+  "line": "if (n >= 0x31 && n <= 0x39) || n == 0x6b { return false } // backreference",
+  "occurrence": 1,
+  "lineno": 402,
+  "reason": "every escape this early return catches is also refused by compile() (unknown alphanumeric escape), and isSafeSource ends with compile(src) != nil"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">=->> => if (n > 0x31 && n <= 0x39) || n == 0x6b { return false } // backreference",
+  "line": "if (n >= 0x31 && n <= 0x39) || n == 0x6b { return false } // backreference",
+  "occurrence": 1,
+  "lineno": 402,
+  "reason": "every escape this early return catches is also refused by compile() (unknown alphanumeric escape), and isSafeSource ends with compile(src) != nil"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "||->&& => if (n >= 0x31 && n <= 0x39) && n == 0x6b { return false } // backreference",
+  "line": "if (n >= 0x31 && n <= 0x39) || n == 0x6b { return false } // backreference",
+  "occurrence": 1,
+  "lineno": 402,
+  "reason": "every escape this early return catches is also refused by compile() (unknown alphanumeric escape), and isSafeSource ends with compile(src) != nil"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => var j = i + 0",
+  "line": "var j = i + 1",
+  "occurrence": 1,
+  "lineno": 408,
+  "reason": "starting the class scan on the '[' itself changes nothing: '[' is neither ']' nor '\\\\', so the scan lands on the same terminator"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">=->> => if j > len { return false }",
+  "line": "if j >= len { return false }",
+  "occurrence": 1,
+  "lineno": 414,
+  "reason": "an unterminated class (j == len) is refused by the compile(src) != nil conjunct at the end of isSafeSource"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => i = j + 0",
+  "line": "i = j + 1",
+  "occurrence": 1,
+  "lineno": 415,
+  "reason": "re-reading the closing ']' as a plain atom leaves prev, the stack and the bit count unchanged"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "3->2 => i += 2",
+  "line": "i += 3",
+  "occurrence": 1,
+  "lineno": 422,
+  "reason": "after '(?' the ':' read as a plain atom leaves prev, the stack and the bit count unchanged (a quantifier right after '(?:' is refused by compile())"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->2 => q = (1, false, 2, 2)",
+  "line": "q = (1, false, 1, 2)",
+  "occurrence": 1,
+  "lineno": 452,
+  "reason": "the quantifier max of '?' is only compared against 64, and 1 and 2 are both below it"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => q = (1, false, 0, 2)",
+  "line": "q = (1, false, 1, 2)",
+  "occurrence": 1,
+  "lineno": 452,
+  "reason": "the quantifier max of '?' is only compared against 64, and 0 and 1 are both below it"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "||->&& => return (o1 && o2) ? UInt64.max : s",
+  "line": "return (o1 || o2) ? UInt64.max : s",
+  "occurrence": 1,
+  "lineno": 459,
+  "reason": "a bound of five or more digits can never compile (braceQuantifier reads at most four digits), so the saturated value only decides between two refusals"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "drop-! => if qunb, let m = qmax, m > MAX_BOUNDED_REPEAT { return false }",
+  "line": "if !qunb, let m = qmax, m > MAX_BOUNDED_REPEAT { return false }",
+  "occurrence": 1,
+  "lineno": 486,
+  "reason": "a bounded repeat above 64 is refused by compile() (MAX_REPEAT), and isSafeSource ends with compile(src) != nil"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "64->65 => static let MAX_BOUNDED_REPEAT: UInt64 = 65",
+  "line": "static let MAX_BOUNDED_REPEAT: UInt64 = 64",
+  "occurrence": 1,
+  "lineno": 15,
+  "reason": "a bounded repeat above 64 is refused by compile() (MAX_REPEAT), and isSafeSource ends with compile(src) != nil"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": ">->>= => } else if let o = qopts, o >= 1 {",
+  "line": "} else if let o = qopts, o > 1 {",
+  "occurrence": 1,
+  "lineno": 489,
+  "reason": "o == 1 adds 64 - lzcnt(0) = 0 bits, the same as skipping the branch"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => } else if let o = qopts, o > 0 {",
+  "line": "} else if let o = qopts, o > 1 {",
+  "occurrence": 1,
+  "lineno": 489,
+  "reason": "o == 1 adds 64 - lzcnt(0) = 0 bits, the same as skipping the branch"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->2 => evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 2",
+  "line": "evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 1",
+  "occurrence": 1,
+  "lineno": 522,
+  "reason": "any value above the evaluation cap poisons the scope: the next charge computes evaluations + 1 > 64 either way"
+ },
+ {
+  "crate": "swift-pca",
+  "file": "Sources/AtlasPCAVerify/SafeRegex.swift",
+  "mutant": "1->0 => evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 0",
+  "line": "evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 1",
+  "occurrence": 1,
+  "lineno": 522,
+  "reason": "the cap value itself also poisons the scope: the next charge computes 64 + 1 > 64"
+ }
+]

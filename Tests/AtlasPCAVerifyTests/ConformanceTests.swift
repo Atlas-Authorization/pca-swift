@@ -135,11 +135,10 @@ final class ConformanceTests: XCTestCase {
     /// The signature suites this Swift verifier implements for a GENUINE crypto verdict — on the leaf
     /// (`requires:"pq"`), on non-leaf capability-chain hops (`requires:"pq-nonleaf"`), the threshold-share
     /// binding, and the PQ transparency artifacts. These are the THREE CROSS-IMPL suites every conformant
-    /// verifier must agree on: classical Ed25519, the pure lattice ML-DSA-65 (FIPS-204, via CryptoKit's
-    /// `MLDSA65`), and the hybrid Ed25519 + ML-DSA-65. The other 7 registered suites (ml-dsa-87,
-    /// slh-dsa-sha2-128f/256s, their hybrids, and the SUF-CMA nested hybrid) are NOT wired in Swift, so a
-    /// vector needing a real signature verdict under them is skipped EXPLICITLY — never silently passed.
-    static let SUPPORTED_SUITES: Set<String> = ["ed25519", "ml-dsa-65", "hybrid-ed25519-ml-dsa-65"]
+    /// verifier must agree on. This is the capability manifest (`PCASuites.supported`, packages/pca/conformance/SUITES.md):
+    /// ed25519 plus, on macOS / iOS 26, every ML-DSA suite (CryptoKit `MLDSA65` / `MLDSA87`). A vector needing a suite
+    /// outside it is refused with `unsupported_suite` (asserted and counted), never silently passed.
+    static let SUPPORTED_SUITES: Set<String> = Set(PCASuites.supported)
 
     /// The concrete suite a vector exercises that this verifier does NOT implement, if any: the leaf `alg`
     /// for `requires:"pq"`, or the first non-supported capability-hop `alg` for `requires:"pq-nonleaf"`.
@@ -163,8 +162,20 @@ final class ConformanceTests: XCTestCase {
         default:
             // 0.4.1: a vector that names one concrete suite (`requires: "ml-dsa-87"`, `"slh-dsa-sha2-128f"`) Swift lacks.
             if let req = v.get("requires")?.asString, !req.isEmpty, !SUPPORTED_SUITES.contains(req) { return req }
+            // 0.4.1 threshold shares carry their own `alg` (r041-share-*): a registered share suite this OS cannot verify
+            // (ML-DSA before macOS / iOS 26) needs a genuine verdict we cannot give, like a leaf suite.
+            for s in p["threshold"]?.get("shares")?.asArray ?? [] {
+                if let a = s.get("alg")?.asString, lacksRegisteredSuite(a) { return a }
+            }
             return nil
         }
+    }
+
+    /// A REGISTERED suite this verifier cannot verify on this OS (ML-DSA before macOS / iOS 26, SLH-DSA, ...). Unknown
+    /// names are not "unsupported" here: they are wire failures every verifier must give on every OS.
+    static func lacksRegisteredSuite(_ alg: String?) -> Bool {
+        guard let a = alg else { return false }
+        return PCASuites.registered.contains(a) && !SUPPORTED_SUITES.contains(a)
     }
 
     /// Whether the EXPECTED verdict is a terminal `{wire:false}` — a wire failure is suite-AGNOSTIC (an
@@ -200,20 +211,44 @@ final class ConformanceTests: XCTestCase {
             // a suite Swift does not implement. A terminal {wire:false} negative (suite-agnostic) still runs.
             if let suite = Self.unsupportedSuite(v), !Self.terminalWireFalse(wantChecks) {
                 skippedBySuite[suite, default: 0] += 1
+                if let obj = v.get("pcactn"), !Self.hasSentinel(obj) {
+                    let ug = PCA.verify(pcactn: obj, grant: v.get("grant") ?? .null, now: now, audience: aud)
+                    if ug.allow || !ug.reason.contains(PCASuites.unsupportedSuiteReason) {
+                        failures.append("\(name): suite \(suite) is not supported here: want an unsupported_suite refusal (\(ug.reason))")
+                    }
+                }
                 continue
             }
             let grant = v.get("grant") ?? .null
             let allowed: [String]? = v.get("context")?.get("allowed_suites")?.asArray?.compactMap { $0.asString }
+            // Intent Layer M2: `intent-*` vectors may carry context.intent_policy (lenient; misconfig fails closed).
+            // context.intent_policy_json (raw JSON text, keeps 950000.0 / 1e6 / -0.0) wins over context.intent_policy.
+            var intentPolicy = v.get("context")?.get("intent_policy").flatMap(IntentPolicy.fromJSON)
+            if let text = v.get("context")?.get("intent_policy_json")?.asString {
+                guard let ip = IntentPolicy.fromJSONText(text) else { failures.append("\(name): bad intent_policy_json"); continue }
+                intentPolicy = ip
+            }
+            // Intent Layer v2: `schema-*` / `session-*` / `acc-*` / `layers-*` vectors carry the verifier state in context.intent_v2.
+            let intentV2 = v.get("context")?.get("intent_v2").flatMap(IntentV2Context.fromJSON)
 
             let got: PCA.Verdict
             if let raw = v.get("pcactn_json")?.asString {
-                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud, allowedSuites: allowed)
+                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2)
             } else if let obj = v.get("pcactn"), Self.hasSentinel(obj) {
                 got = PCA.Verdict(allow: false, checks: ["wire": false], reason: "wire: lone surrogate")
             } else {
-                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, allowedSuites: allowed)
+                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2)
             }
 
+            // Intent Layer v2 suite capability: a vector that needs a suite this verifier lacks must FAIL closed with
+            // `unsupported_suite` (never accept, never another reason); `expect.reason_contains` is checked as given.
+            if let rs = v.get("requires_suite")?.asString, PQ.resolve(rs) == nil {
+                // a vector that names its refusal (reason_contains: e.g. the session-root pin checks) reaches it before the suite work
+                let want = expect.get("reason_contains")?.asString ?? "unsupported_suite"
+                if got.allow || !got.reason.contains(want) { failures.append("\(name): requires_suite \(rs): want a '\(want)' refusal (\(got.reason))") }
+                continue
+            }
+            if let rc = expect.get("reason_contains")?.asString, !got.reason.contains(rc) { failures.append("\(name): reason lacks '\(rc)' (\(got.reason))") }
             if got.allow != wantAllow {
                 failures.append("\(name): allow = \(got.allow), want \(wantAllow) (\(got.reason))")
             }
@@ -240,6 +275,125 @@ final class ConformanceTests: XCTestCase {
     }
 
     // ---- primitive tables ----
+
+    /// Intent Layer v2 rule-level primitives: `intent_schema` (rule 14), `intent_revocation` (rule 13 step 7), `intent_world`
+    /// (16), `intent_provenance` (17), `intent_classifier` (18). A table absent from the corpus (generated at freeze) is skipped.
+    func testIntentV2Primitives() throws {
+        let prim = try Self.loadCorpus().get("primitives")!
+        var bad: [String] = []
+        var ran = 0
+        // a primitive's `input_json` (raw JSON text) is parsed with this verifier's own parser and used INSTEAD of `input`, so
+        // lexemes the corpus JSON round trip would erase (a negative zero) survive
+        func inputOf(_ e: JSONValue) -> JSONValue {
+            if let t = e.get("input_json")?.asString { return (try? StrictJSON.parseLenient(t)) ?? .null }
+            return e.get("input") ?? .null
+        }
+        func boolOf(_ v: JSONValue?) -> Bool? { if case let .bool(b)? = v { return b }; return nil }
+        func same(_ a: JSONValue?, _ b: JSONValue?) -> Bool {
+            guard let a = a, let b = b else { return a == nil && b == nil }
+            return Predicates.deepEq(a, b)
+        }
+        /// a primitive that needs a suite the dispatch lacks must come back refused (never compared as if supported)
+        func lacksSuite(_ e: JSONValue) -> Bool { e.get("requires_suite")?.asString.map { PQ.resolve($0) == nil } ?? false }
+        for e in prim.get("intent_schema")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let i = inputOf(e)
+            guard let x = e.get("expect"), let verb = i.get("verb")?.asString else { bad.append("\(name): malformed"); continue }
+            let r = PCA.intentSchemaPrimitive(schema: i.get("schema") ?? .null, keys: i.get("keys") ?? .null, verb: verb, params: i.get("params") ?? .null)
+            if lacksSuite(e) { if r.sig { bad.append("\(name): accepted a suite this verifier lacks") }; continue }
+            if r.sig != boolOf(x.get("sig")) { bad.append("\(name): sig \(r.sig)") }
+            if let d = x.get("digest")?.asString, r.digest != d { bad.append("\(name): digest \(r.digest ?? "nil")") }
+            let c = x.get("conform")
+            if r.conformOk != boolOf(c?.get("ok")) { bad.append("\(name): conform ok \(r.conformOk)") }
+            if !r.conformOk {
+                if r.code != c?.get("code")?.asString { bad.append("\(name): code \(r.code ?? "nil")") }
+                if r.path != c?.get("path")?.asString { bad.append("\(name): path \(r.path ?? "nil")") }
+            }
+        }
+        for e in prim.get("intent_revocation")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let ok = PCA.intentRevocationPrimitive(inputOf(e))
+            if lacksSuite(e) { if ok { bad.append("\(name): accepted a suite this verifier lacks") }; continue }
+            if ok != boolOf(e.get("expect")?.get("ok")) { bad.append("\(name): ok \(ok)") }
+        }
+        for e in prim.get("intent_world")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentWorldPrimitive(inputOf(e))
+            let x = e.get("expect")
+            if lacksSuite(e) { if r.ok || !r.reason.contains("unsupported_suite") { bad.append("\(name): want an unsupported_suite refusal (\(r.reason))") }; continue }
+            if let rc = x?.get("reason_contains")?.asString, !r.reason.contains(rc) { bad.append("\(name): reason lacks '\(rc)' (\(r.reason))") }
+            if r.ok != boolOf(x?.get("ok")) { bad.append("\(name): ok \(r.ok)"); continue }
+            if r.ok {
+                if !same(r.world, x?.get("world")) { bad.append("\(name): world \(String(describing: r.world))") }
+                let ss: JSONValue = .array((r.singleSource ?? []).map { .string($0) })
+                if !same(ss, x?.get("single_source")) { bad.append("\(name): single_source \(r.singleSource ?? [])") }
+            }
+        }
+        for e in prim.get("intent_provenance")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentProvenancePrimitive(inputOf(e))
+            let x = e.get("expect")
+            if lacksSuite(e) { if r.outcome != "deny" || !r.reason.contains("unsupported_suite") { bad.append("\(name): want an unsupported_suite refusal (\(r.reason))") }; continue }
+            if let rc = x?.get("reason_contains")?.asString, !r.reason.contains(rc) { bad.append("\(name): reason lacks '\(rc)' (\(r.reason))") }
+            if r.outcome != x?.get("outcome")?.asString { bad.append("\(name): outcome \(r.outcome)"); continue }
+            if r.outcome != "deny" {
+                let labels: JSONValue = .object(Dictionary(uniqueKeysWithValues: r.labels.map { (JKey($0.key), JSONValue.string($0.value)) }))
+                let classes: JSONValue = .object(Dictionary(uniqueKeysWithValues: r.classes.map { (JKey($0.key), JSONValue.array($0.value.map { .string($0) })) }))
+                if !same(labels, x?.get("labels")) { bad.append("\(name): labels \(r.labels)") }
+                if !same(classes, x?.get("classes")) { bad.append("\(name): classes \(r.classes)") }
+                if r.outcome == "question" && r.friction != x?.get("friction")?.asString { bad.append("\(name): friction \(r.friction ?? "nil")") }
+            }
+        }
+        for e in prim.get("intent_classifier")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentClassifierPrimitive(inputOf(e))
+            let x = e.get("expect")
+            if lacksSuite(e) { if r.ok || !r.reason.contains("unsupported_suite") { bad.append("\(name): want an unsupported_suite refusal (\(r.reason))") }; continue }
+            if let rc = x?.get("reason_contains")?.asString, !r.reason.contains(rc) { bad.append("\(name): reason lacks '\(rc)' (\(r.reason))") }
+            if r.ok != boolOf(x?.get("ok")) { bad.append("\(name): ok \(r.ok)"); continue }
+            if r.ok && !same(r.classes, x?.get("classes")) { bad.append("\(name): classes \(String(describing: r.classes))") }
+        }
+        for e in prim.get("intent_read_purpose")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentReadPurposePrimitive(inputOf(e))
+            let x = e.get("expect")
+            let mn: JSONValue = .array(r.minimise.map { .string($0) }), un: JSONValue = .array(r.uncovered.map { .string($0) })
+            if r.outcome != x?.get("outcome")?.asString || !same(mn, x?.get("minimise")) || !same(un, x?.get("uncovered")) { bad.append("\(name): read purpose \(r)") }
+        }
+        for e in prim.get("intent_map_commit")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let got = PCA.intentMapCommitPrimitive(inputOf(e))
+            if got != e.get("expect")?.get("map_commit")?.asString { bad.append("\(name): map_commit \(got ?? "nil")") }
+        }
+        for e in prim.get("intent_map")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentMapPrimitive(inputOf(e))
+            let x = e.get("expect")
+            if r.ok != boolOf(x?.get("ok")) { bad.append("\(name): ok \(r.ok) (\(r.reason))"); continue }
+            if r.ok {
+                if !same(.array(r.cell.map { .int($0) }), x?.get("cell")) { bad.append("\(name): cell \(r.cell)") }
+                if let pp = x?.get("p_ppm"), !same(.int(r.pPpm), pp) { bad.append("\(name): p_ppm \(r.pPpm)") }
+            }
+        }
+        for e in prim.get("intent_wb_active")?.asArray ?? [] {
+            ran += 1
+            let name = e.get("name")?.asString ?? "?"
+            let r = PCA.intentWBActivePrimitive(inputOf(e))
+            let x = e.get("expect")
+            if r.facts != boolOf(x?.get("facts")) || r.provenance != boolOf(x?.get("provenance")) || r.classes != boolOf(x?.get("classes")) {
+                bad.append("\(name): active \(r)")
+            }
+        }
+        XCTAssertTrue(bad.isEmpty, "\(bad.count) of \(ran) intent v2 primitives failed:\n" + bad.joined(separator: "\n"))
+    }
 
     func testCanonicalAndHash() throws {
         let doc = try Self.loadCorpus()
@@ -314,11 +468,18 @@ final class ConformanceTests: XCTestCase {
             return XCTFail("no threshold_share primitives")
         }
         var failures: [String] = []
-        var accepted = 0, rejected = 0
+        var accepted = 0, rejected = 0, skippedBySuite = 0
         var bareRejected = false, wrongSetRejected = false
         for ts in shares {
             let name = ts.get("name")?.asString ?? ts.get("role")?.asString ?? "<unnamed>"
             let want: Bool = { if case let .bool(b)? = ts.get("valid") { return b }; return true }()
+            // a share under a registered suite this OS cannot verify (ML-DSA before macOS 26): its suite tag cannot be
+            // resolved, so the bound message is not comparable; it must still be REFUSED (fail closed), never accepted.
+            if let a = ts.get("share")?.get("alg")?.asString, Self.lacksRegisteredSuite(a) {
+                if Threshold.verifyShare(ts) { failures.append("\(name): share under unsupported suite \(a) verified (want fail closed)") }
+                skippedBySuite += 1
+                continue
+            }
 
             // sanity: signerSetHash + bound shareMessage are recomputed byte-for-byte from the signer set.
             if let roleStr = ts.get("role")?.asString, let role = Threshold.Role(rawValue: roleStr),
@@ -349,7 +510,7 @@ final class ConformanceTests: XCTestCase {
         XCTAssertTrue(bareRejected, "v2.1 binding: the pre-v2.1 bare agent share (agent-bare-rejected) MUST be rejected")
         XCTAssertTrue(wrongSetRejected, "v2.1 binding: a cross-signer-set agent share replay (agent-bound-wrong-set) MUST be rejected")
         print("PCA threshold shares: \(accepted) valid accepted, \(rejected) invalid rejected "
-            + "(incl. v2.1 bare-agent-share + cross-signer-set replay)")
+            + "(incl. v2.1 bare-agent-share + cross-signer-set replay); \(skippedBySuite) refused (suite not on this OS)")
     }
 
     /// R4-01: the standalone chain API with verifier-side root PQ authority (`primitives.chain_pin[]`). A non-ed25519 ROOT
@@ -360,9 +521,11 @@ final class ConformanceTests: XCTestCase {
         guard let vecs = doc.get("primitives")?.get("chain_pin")?.asArray else { return XCTFail("no chain_pin primitives") }
         XCTAssertGreaterThanOrEqual(vecs.count, 25)
         var failures: [String] = []
+        var refusedBySuite = 0
         for v in vecs {
             let name = v.get("name")?.asString ?? "?"
             guard let chain = v.get("chain")?.asArray, let exp = v.get("expect") else { failures.append("\(name): malformed vector"); continue }
+            let lacking = chain.compactMap { $0.get("alg")?.asString }.first(where: Self.lacksRegisteredSuite)
             var pins: [String: String]? = nil
             if let o = v.get("pq_pins")?.asObject {
                 var m: [String: String] = [:]
@@ -372,6 +535,13 @@ final class ConformanceTests: XCTestCase {
             let allowed = v.get("allowed_suites")?.asArray?.compactMap { $0.asString }
             let got = Capability.verifyChain(chain, expectedRootIssuer: v.get("expected_root_issuer")?.asString,
                                              allowedSuites: allowed, pqPins: pins, trustedRoot: v.get("trusted_root"))
+            // a hop under a suite this OS cannot verify (ML-DSA before macOS 26): the chain must be REFUSED (fail closed);
+            // the expected verdict / reason needs the suite, so it is not compared.
+            if let a = lacking {
+                if got == nil { failures.append("\(name): accepted a hop under unsupported suite \(a) (want fail closed)") }
+                refusedBySuite += 1
+                continue
+            }
             var wantOk = false
             if case let .bool(b)? = exp.get("ok") { wantOk = b }
             if (got == nil) != wantOk { failures.append("\(name): ok = \(got == nil), want \(wantOk) (\(got ?? ""))") }
@@ -380,7 +550,36 @@ final class ConformanceTests: XCTestCase {
             }
         }
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
-        print("PCA chain_pin: \(vecs.count) run of \(vecs.count)")
+        print("PCA chain_pin: \(vecs.count - refusedBySuite) run of \(vecs.count); \(refusedBySuite) refused (suite not on this OS)")
+    }
+
+    /// 0.4.2 fail closed: with the stored grant (`trustedRoot`) AND a pin for the issuer, a disagreeing pin refuses; the
+    /// stored grant never overrides it. Built from the shared chain_pin fixtures (the signed roots come from the reference).
+    func testStoredGrantAndPinMustAgree() throws {
+        let doc = try Self.load("vectors.json")
+        guard let vecs = doc.get("primitives")?.get("chain_pin")?.asArray else { return XCTFail("no chain_pin primitives") }
+        func vec(_ n: String) -> JSONValue? { vecs.first { $0.get("name")?.asString == n } }
+        func pinsOf(_ n: String) -> [String: String] {
+            var m: [String: String] = [:]
+            for (k, val) in vec(n)?.get("pq_pins")?.asObject ?? [:] { m[k.s] = val.asString ?? "" }
+            return m
+        }
+        guard let v = vec("chainpin-pure-pq-root-trusted-root"), let chain = v.get("chain")?.asArray,
+              let eri = v.get("expected_root_issuer")?.asString else { return XCTFail("fixture missing") }
+        let tr = v.get("trusted_root")
+        // before macOS / iOS 26 there is no ML-DSA: every one of these must be refused as unsupported_suite (fail closed).
+        if Self.lacksRegisteredSuite("ml-dsa-65") {
+            for pins in [pinsOf("chainpin-hybrid-root-wrong-pin"), [eri: "not-the-key"], pinsOf("chainpin-pure-pq-root-pinned"), ["someone-else": "k"]] {
+                let r = Capability.verifyChain(chain, expectedRootIssuer: eri, allowedSuites: nil, pqPins: pins, trustedRoot: tr)
+                XCTAssertTrue(r?.contains(PCASuites.unsupportedSuiteReason) ?? false, "want an unsupported_suite refusal, got \(r ?? "nil")")
+            }
+            return
+        }
+        let want = "hop 0: root suite 'ml-dsa-65': the server-side PQ pin for the root issuer (policy.pqPins) does not match the stored grant's pq_pk (fail closed)"
+        XCTAssertEqual(Capability.verifyChain(chain, expectedRootIssuer: eri, allowedSuites: nil, pqPins: pinsOf("chainpin-hybrid-root-wrong-pin"), trustedRoot: tr), want)
+        XCTAssertEqual(Capability.verifyChain(chain, expectedRootIssuer: eri, allowedSuites: nil, pqPins: [eri: "not-the-key"], trustedRoot: tr), want)
+        XCTAssertNil(Capability.verifyChain(chain, expectedRootIssuer: eri, allowedSuites: nil, pqPins: pinsOf("chainpin-pure-pq-root-pinned"), trustedRoot: tr))
+        XCTAssertNil(Capability.verifyChain(chain, expectedRootIssuer: eri, allowedSuites: nil, pqPins: ["someone-else": "k"], trustedRoot: tr))
     }
 
     /// The post-quantum transparency / authority artifacts (`primitives.pq_artifact[]`) — `sth`, `revocation`,
@@ -470,14 +669,21 @@ final class ConformanceTests: XCTestCase {
         var ran = 0
         for v in vecs {
             let name = v.get("name")?.asString ?? "?"
-            if let req = v.get("requires")?.asString, !Self.SUPPORTED_SUITES.contains(req) { continue }
+            if let req = v.get("requires")?.asString, !Self.SUPPORTED_SUITES.contains(req) {
+                // the share's suite is not on this OS: it must be refused (fail closed), never accepted
+                if Self.lacksRegisteredSuite(v.get("share")?.get("alg")?.asString), Threshold.verifyShare(v) {
+                    failures.append("\(name): share under unsupported suite verified (want fail closed)")
+                }
+                continue
+            }
             ran += 1
             var want = false
             if case let .bool(b)? = v.get("valid") { want = b }
             let got = Threshold.verifyShare(v)
             if got != want { failures.append("\(name): verified = \(got), want \(want)") }
         }
-        XCTAssertGreaterThanOrEqual(ran, 50)
+        // 65 vectors: every one runs with ML-DSA (macOS / iOS 26, Linux + liboqs); before 26 the 21 ML-DSA ones are refused.
+        XCTAssertGreaterThanOrEqual(ran, Self.lacksRegisteredSuite("ml-dsa-65") ? 40 : 50)
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
         print("PCA threshold_set: \(ran) run of \(vecs.count)")
     }

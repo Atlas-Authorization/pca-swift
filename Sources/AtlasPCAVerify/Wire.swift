@@ -13,6 +13,10 @@ enum Wire {
         "threshold", "zk_compliance", "bond_ref",
         // B4 crypto-agility (additive): absent `alg` == "ed25519" and validates exactly as the classical wire.
         "alg", "pq_pk", "pq_sig",
+        // Intent Layer M2 (additive, SIGNED): the `envelope.intent` binding (Intent.swift).
+        "intent",
+        // Intent Layer v2 (additive, SIGNED): the session member (IntentSession.swift, rule 13).
+        "intent_session",
     ]
     static let MAX_AUD_LEN = 256
     static let MAX_NONCE_LEN = 128
@@ -136,6 +140,8 @@ enum Wire {
         if let v = p["rationale_commitment"], !b32(v) { return "'rationale_commitment' is not canonical base64url (32 bytes)" }
         if let v = p["tool_binding"], !b32(v) { return "'tool_binding' is not canonical base64url (32 bytes)" }
         if let v = p["progress_step"], !v.isObject { return "'progress_step' must be an object" }
+        if let v = p["intent"], let e = Intent.validateWire(v) { return e }
+        if let v = p["intent_session"], let e = IntentSession.validateWire(v) { return e }
         if let v = p["prohibition_evidence"], !v.isObject && !v.isArray { return "'prohibition_evidence' must be an object or array" }
         if let th = p["threshold"] {
             guard let shares = th.asObject?["shares"]?.asArray else { return "'threshold' must be {shares:[...]}" }

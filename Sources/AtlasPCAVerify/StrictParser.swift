@@ -138,7 +138,8 @@ enum StrictJSON {
                 while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
             }
             let lex = String(decoding: b[start..<i], as: UTF8.self)
-            if !isFloat, let n = Int64(lex) { return .int(n) }
+            // "-0" keeps its sign (JSON.parse("-0") is -0): Int64("-0") would silently drop it
+            if !isFloat, let n = Int64(lex), !(n == 0 && lex.hasPrefix("-")) { return .int(n) }
             guard let d = Double(lex) else { throw err("bad number") }
             return .double(d)
         }
