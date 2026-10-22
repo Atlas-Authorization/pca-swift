@@ -2,7 +2,7 @@ import Foundation
 
 /// The CORE PCActn verifier (wire format v2). Byte-matches `@atlasauth/pca` and the Rust / Go / .NET
 /// verifiers. Checks, in the normative order: wire (terminal), version, audience, validity, chain,
-/// plan_inclusion, leaf_signature, counter. Later-milestone checks (attestation, threshold, revocation, …)
+/// plan_inclusion, leaf_signature, counter (then `intent` when the PCActn carries it). Later-milestone checks (attestation, threshold, revocation, …)
 /// are out of scope for the core verdict.
 public enum PCA {
     public static let WIRE_VERSION: Int64 = 2
@@ -44,27 +44,29 @@ public enum PCA {
     }
 
     /// Verify RAW PCActn text: strict-parse first (a parse failure is a `wire` failure), then the core checks.
-    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil) -> Verdict {
+    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
         if text.utf8.count > MAX_ARTIFACT_BYTES { return wireFail(ARTIFACT_SIZE_REASON) } // FIRST: before any parsing
         do {
             let v = try StrictJSON.parse(text)
-            return verify(pcactn: v, grant: grant, now: now, audience: audience, allowedSuites: allowedSuites)
+            return verify(pcactn: v, grant: grant, now: now, audience: audience, allowedSuites: allowedSuites, intentPolicy: intentPolicy, intentV2: intentV2)
         } catch {
             return wireFail("\(error)")
         }
     }
 
     /// Convenience: concrete audience id (as the conformance harness and the other verifiers use).
-    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil) -> Verdict {
-        verify(json: text, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites)
+    public static func verify(json text: String, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
+        verify(json: text, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites, intentPolicy: intentPolicy, intentV2: intentV2)
     }
 
-    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil) -> Verdict {
-        verify(pcactn: pcactn, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites)
+    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: String, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
+        verify(pcactn: pcactn, grant: grant, now: now, audience: .id(audience), allowedSuites: allowedSuites, intentPolicy: intentPolicy, intentV2: intentV2)
     }
 
     /// `allowedSuites`: optional verifier suite policy (nil = none; an empty list refuses everything). Absent `alg` == "ed25519".
-    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil) -> Verdict {
+    /// `intentPolicy`: optional Intent Layer M2 policy (nil = none). The `intent` check runs after `counter` and is
+    /// reported iff the PCActn carries `intent` or the policy is active; otherwise the verdict is the pre-M2 one.
+    public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
         if let why = Wire.validate(pcactn) { return wireFail(why) }
         guard let p = pcactn.asObject else { return wireFail("PCActn is not an object") }
 
@@ -155,6 +157,20 @@ public enum PCA {
         // counter: safe integer >= 0
         let counterOk = (p["counter"]?.safeInt).map { $0 >= 0 } ?? false
         record("counter", counterOk, "missing or not a non-negative safe integer")
+
+        // Intent Layer M2: `intent` (reported iff the PCActn carries `intent` or the policy is active)
+        let session = p["intent_session"]?.get("session")?.asString
+        let mapForm = p["intent_session"]?.get("map_form")?.asString
+        if let d = Intent.decide(p["intent"], grant: grant, policy: intentPolicy, session: session, mapForm: mapForm) {
+            record("intent", d.ok, d.why)
+        }
+
+        // Intent Layer v2, in order: schema (rule 14), intent_session (13), layers (V5), accumulators (15), facts (16),
+        // provenance (17), classes (18); each reported only when the PCActn carries `intent_session` or a v2 policy is
+        // active (IntentV2.swift). Absent both, the verdict is the pre-v2 one.
+        for c in IntentV2.decide(p, grant: grant, ctx: intentV2, now: now).checks {
+            record(c.name, c.ok, c.reason)
+        }
 
         let allow = checks.values.allSatisfy { $0 }
         return Verdict(allow: allow, checks: checks, reason: reason)

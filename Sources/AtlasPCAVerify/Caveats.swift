@@ -111,6 +111,9 @@ extension PCA {
         case "budget_alloc":
             guard let lim = finite(c[JKey("limit")]) else { return false }
             return lim >= 0
+        case IntentSession.CAVEAT:
+            // Intent Layer v2 session binding (rule 13): no per-action constraint here; satisfied iff well-formed.
+            return IntentSession.caveatError(cv) == nil
         default:
             return false
         }

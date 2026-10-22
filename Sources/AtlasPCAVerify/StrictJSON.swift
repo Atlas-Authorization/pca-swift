@@ -48,17 +48,17 @@ enum Canonical {
     static func doubleError(_ d: Double) -> String? {
         if !d.isFinite { return "non-finite number" }
         if d == 0 && d.sign == .minus { return "negative zero" }
-        if d.rounded() == d { return abs(d) > Double(MAX_SAFE) ? "integer outside the safe range" : nil }
-        if abs(d) < 1e-6 { return "non-integer magnitude below 1e-6" }
+        if d.rounded() == d { return abs(d) > Double(MAX_SAFE) ? "integer outside the safe range (|n| > 2^53-1)" : nil }
+        if abs(d) < 1e-6 { return "non-integer magnitude below 1e-6 (needs an exponent form; not representable in the canonical decimal form)" }
         let plain = numberString(abs(d))
         let noDot = plain.filter { $0 != "." }
         let sig = noDot.drop(while: { $0 == "0" })
-        if sig.count > MAX_DECIMAL_DIGITS { return "more than 15 significant digits" }
+        if sig.count > MAX_DECIMAL_DIGITS { return "non-integer number has more than 15 significant digits" }
         return nil
     }
 
     static func intError(_ i: Int64) -> String? {
-        (i < -MAX_SAFE || i > MAX_SAFE) ? "integer outside the safe range" : nil // not abs(): abs(Int64.min) traps
+        (i < -MAX_SAFE || i > MAX_SAFE) ? "integer outside the safe range (|n| > 2^53-1)" : nil // not abs(): abs(Int64.min) traps
     }
 
     /// The canonical decimal for a double: shortest round-trip (via Swift's `description`) re-rendered as a

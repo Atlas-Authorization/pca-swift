@@ -1,0 +1,61 @@
+name: CI
+
+# swift build + swift test on macOS (CryptoKit): AtlasPCAVerify (incl. the shared conformance corpus,
+# ConformanceTests.swift over conformance/vectors.json) and AtlasPCAStepUp. The ML-DSA path uses CryptoKit's MLDSA65,
+# so compiling needs the Xcode 26 SDK; macos-15 runs the same build on an older OS (runtime availability checks: no ML-DSA
+# there, so the ML-DSA vectors must come back refused as unsupported_suite, which the tests assert).
+# swift test (linux) builds AtlasPCAVerify + its tests the way the Linux mutation shards do (the flagship's
+# tools/pca-audit/swift-mutate/linux-prep.sh: swift-crypto for CryptoKit, liboqs for ML-DSA), so a test or source that only
+# builds against CryptoKit fails here and not first in a 24-shard Mutation run.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: swift test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Toolchain
+        run: swift --version && xcodebuild -version && sw_vers
+      - name: Build
+        run: swift build
+      - name: Tests + conformance corpus
+        run: swift test
+
+  linux:
+    name: swift test (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh swift-pca
+      - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA) + build incl. tests
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: Tests + conformance corpus (ML-DSA via liboqs)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter AtlasPCAVerifyTests
