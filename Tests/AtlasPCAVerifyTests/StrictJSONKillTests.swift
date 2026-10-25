@@ -35,9 +35,9 @@ final class StrictJSONKillTests: XCTestCase {
         XCTAssertEqual(strictError(.double(-0.0)), "canonicalize: negative zero")
         XCTAssertEqual(try Canonical.canonicalizeStrict(.double(-1.5)), "-1.5")
         XCTAssertEqual(try Canonical.canonicalizeStrict(.double(9_007_199_254_740_991.0)), "9007199254740991")
-        XCTAssertEqual(strictError(.double(9_007_199_254_740_992.0)), "canonicalize: integer outside the safe range")
-        XCTAssertEqual(strictError(.double(-9_007_199_254_740_992.0)), "canonicalize: integer outside the safe range")
-        XCTAssertEqual(strictError(.int(Int64.max)), "canonicalize: integer outside the safe range")
+        XCTAssertEqual(strictError(.double(9_007_199_254_740_992.0)), "canonicalize: integer outside the safe range (|n| > 2^53-1)")
+        XCTAssertEqual(strictError(.double(-9_007_199_254_740_992.0)), "canonicalize: integer outside the safe range (|n| > 2^53-1)")
+        XCTAssertEqual(strictError(.int(Int64.max)), "canonicalize: integer outside the safe range (|n| > 2^53-1)")
     }
 
     /// Lenient canonical numbers equal ECMAScript `String(x)` (shortest round-trip, plain decimal) for |x| < 1e21.

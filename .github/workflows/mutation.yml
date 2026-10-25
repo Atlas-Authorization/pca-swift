@@ -1,0 +1,173 @@
+name: Mutation
+
+# Mutation testing of AtlasPCAVerify with the operator mutator in the flagship (tools/pca-audit/swift-mutate; oracle =
+# swift test AtlasPCAVerifyTests incl. the full adversarial corpus) over every file of Sources/AtlasPCAVerify (incl. the
+# Intent Layer v2 ones), split into 24 shards (every 24th mutant; 8 shards took 30-45 min each on the 0.4.1 sources, a
+# third of the current ones). Runs on Linux
+# like the ledgered runs: linux-prep.sh builds the package against swift-crypto and liboqs (ML-DSA-65), so the
+# post-quantum vectors really run. The merge job checks the survivors against the equivalent-mutant ledger: it passes when
+# every survivor is a ledgered equivalent and no ledger entry is stale. Runs on demand and on ci/** branches (the
+# release-candidate check), never on main pushes.
+#
+# TARGETED mode (the default whenever a usable baseline exists; the pca-ruby scheme, tools/pca-audit/mut-carry): every shard
+# uploads mut-results-<k> (each mutant's result, carried ones included) and the run uploads mut-snapshot (the tests + shared
+# corpus it ran against). The next run pools the results of the newest earlier runs of this branch (the input `baseline_run`
+# pins one) and re-runs ONLY: mutants the pool never saw, its survivors, and every mutant whose func/init/subscript (or the
+# file's code outside every one of them) changed (comments and blank lines do not count). A NONVIABLE result is carried only
+# when the whole production source is unchanged. A run is used as a baseline only when its mutator is identical and the tests
+# and corpus it ran against only GREW since (new files, pure line insertions, JSON that gained data): any edited or removed test
+# line, binary change or changed vector makes that run unusable and the shard runs in full. The pool is keyed by mutant identity
+# (file, def, operator, line text, occurrence), not by index or shard, so a different shard layout needs no special case. Each
+# shard still reports its COMPLETE slice (carried results included), so the merge checks the ledger over the full picture.
+# No usable baseline (or `full: true`) = a full run, which seeds the next one.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_run:
+        description: 'run id whose mut-results-<k> + mut-snapshot artifacts seed a targeted run (default: newest earlier runs on this branch)'
+        required: false
+        default: ''
+      full:
+        description: 'ignore any baseline results: mutate everything'
+        type: boolean
+        default: false
+  push:
+    branches: ['ci/**']
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  # a push supersedes an earlier push run; a dispatched (queue) run is never killed by a later push to the branch
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  CRATE: swift-pca
+  SHARDS: '24'
+  WORKERS: '2'
+  # part of the baseline identity: a run with other mutator settings is no baseline
+  MUT_CFG: 'swift-mutate workers=2'
+
+jobs:
+  # the tests + corpus this run mutates against (the next run's baseline check); small, runs alongside the shards
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Snapshot
+        run: |
+          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
+            --corpus-root="$MONO" --out=mut-snapshot --cfg="$MUT_CFG" \
+            --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mut-snapshot
+          path: mut-snapshot/
+          retention-days: 30
+
+  shard:
+    name: shard ${{ matrix.shard }}/24
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA-65)
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: Baseline results (targeted mode)
+        if: ${{ !inputs.full }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE: ${{ inputs.baseline_run }}
+        run: |
+          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
+            --corpus-root="$MONO" --out="$RUNNER_TEMP/snap" --cfg="$MUT_CFG" \
+            --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
+          node "$MONO/tools/pca-audit/mut-carry/baseline.mjs" --repo="$GITHUB_REPOSITORY" --branch="$GITHUB_REF_NAME" \
+            --exclude-run="$GITHUB_RUN_ID" --explicit="$BASELINE" --snapshot="$RUNNER_TEMP/snap" --out="$RUNNER_TEMP/base" >> "$GITHUB_ENV"
+      - name: Mutate
+        working-directory: ${{ env.MONO }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP/smt"; mkdir -p "$TMPDIR"
+          # the workers' package copies (Sources/Tests/Package.swift) find the vendored corpus next to them
+          for w in $(seq 0 $((WORKERS - 1))); do
+            mkdir -p "$TMPDIR/swiftmut/w$w/sdks/swift-pca"
+            ln -sfn "$MONO/sdks/swift-pca/conformance" "$TMPDIR/swiftmut/w$w/sdks/swift-pca/conformance"
+          done
+          FILES="$(cd sdks/swift-pca && ls Sources/AtlasPCAVerify/*.swift | tr '\n' ' ')"
+          node tools/pca-audit/swift-mutate/mutate.mjs run "$WORKERS" 320 "$RUNNER_TEMP/raw.json" $FILES \
+            --every="$SHARDS" --offset=$(( ${{ matrix.shard }} - 1 )) ${BASE_POOL:+--carry="$BASE_POOL"}
+          # the next run's baseline: this slice's results (carried ones included)
+          mkdir -p "$RUNNER_TEMP/mut-results"; cp "$RUNNER_TEMP/raw.json" "$RUNNER_TEMP/mut-results/results.json"
+          node -e '
+            const fs = require("fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const want = Number(process.argv[2]); if (r.length < want) { console.error(`budget ran out: ${r.length} of ${want} mutants`); process.exit(1); }
+          ' "$RUNNER_TEMP/raw.json" "$(node tools/pca-audit/swift-mutate/mutate.mjs list $(for f in $FILES; do echo sdks/swift-pca/$f; done) 2>/dev/null | awk -v n="$SHARDS" -v k=$(( ${{ matrix.shard }} - 1 )) 'BEGIN{c=0} { if ((NR-1) % n == k) c++ } END{print c}')"
+      - name: Report
+        run: |
+          node "$MONO/tools/pca-audit/swift-mutate/mutate.mjs" survivors --src="$MONO/sdks/swift-pca" "$RUNNER_TEMP/raw.json" > survivors-raw.json
+          node -e '
+            const fs = require("fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const counts = {}; for (const m of r) counts[m.status] = (counts[m.status] || 0) + 1;
+            const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map((x) => { const o = { ...x }; if (o.occurrence === undefined) delete o.occurrence; return o; });
+            fs.writeFileSync("counts.json", JSON.stringify(counts)); fs.writeFileSync("survivors.json", JSON.stringify(s));
+          ' "$RUNNER_TEMP/raw.json"
+          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$SHARDS" --tool=swift-mutate \
+            --counts=counts.json --survivors=survivors.json --out=shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: shard-${{ matrix.shard }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mut-results-${{ matrix.shard }}
+          path: ${{ runner.temp }}/mut-results/
+          retention-days: 30
+
+  merge:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship checker + ledger
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: shard-*
+      - name: Merge shards and check the ledger
+        run: >
+          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports
+          --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: survivors-merged
+          path: reports/survivors-merged.json
+          if-no-files-found: ignore

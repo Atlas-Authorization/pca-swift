@@ -80,7 +80,7 @@ enum Capability {
     /// hybrid requires BOTH. An unknown suite fails closed before any hashing.
     private static func checkSig(_ c: JObject, signer: String, label: String, pq: PinnedPQ?) -> String? {
         guard let body = signableHopBody(c) else {
-            return "\(label): unknown signature alg '\(c["alg"]?.asString ?? "")'"
+            return "\(label): \(PQ.refusal(c["alg"]?.asString))"
         }
         // STRICT canonical form, like the reference (hashCanonical in hash.ts is strict): a hop body out of the strict
         // profile (nesting deeper than MAX_JSON_DEPTH, unsafe integer, ...) is refused, never hashed leniently.
@@ -104,6 +104,10 @@ enum Capability {
             + "(policy.trustedRoot); the root's own pq_pk proves nothing about who issued it (R3-01)"
     }
 
+    static func rootPqPinMismatchReason(_ alg: String) -> String {
+        "hop 0: root suite '\(alg)': the server-side PQ pin for the root issuer (policy.pqPins) does not match the stored grant's pq_pk (fail closed)"
+    }
+
     /// The root hop has no parent holding a `holder_pq` commitment, so a non-ed25519 root's PQ key must come from a
     /// verifier-side authority: the verifier's stored copy of this very grant (`trustedRoot`, same content hash) or a pin
     /// for `root.issuer`. Mirrors `rootPq` in capability.ts. Returns (key or nil for an Ed25519 root, refusal reason or nil).
@@ -112,6 +116,10 @@ enum Capability {
         let pk = root["pq_pk"]?.asString
         var trusted: String? = nil
         if let tr = trustedRoot, let pk = pk, capHash(tr) == capHash(.object(root)) { trusted = pk }
+        // 0.4.2 fail closed: with the stored grant AND a pin for the issuer, both must agree (the grant never overrides a pin).
+        if let t = trusted, let pins = pqPins, let iss = root["issuer"]?.asString, let pin = pins[iss], pin != t {
+            return (nil, rootPqPinMismatchReason(suite.alg.rawValue))
+        }
         let key = PQ.resolvePqKey(identity: root["issuer"]?.asString, artifactPk: pk, pqPins: pqPins, trustedPk: trusted)
         guard let k = key else { return (nil, rootPqPinReason(suite.alg.rawValue)) }
         return (k, nil)
