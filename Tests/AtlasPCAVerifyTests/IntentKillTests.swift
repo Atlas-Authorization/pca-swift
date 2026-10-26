@@ -6,7 +6,7 @@ import Foundation
 /// boundary is pinned on both sides so an off-by-one, negated or deleted branch changes a verdict. Fixture: IntentTests.
 final class IntentKillTests: XCTestCase {
     typealias F = IntentTests
-    static let PRIOR = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"]
+    static let PRIOR = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"]
 
     static func bound() -> JSONValue { F.rootGrant([F.envelope(.string(F.commit()))]) }
 
@@ -177,7 +177,7 @@ final class IntentKillTests: XCTestCase {
 
     func testVerdictShapeAndOrder() throws {
         let g = Self.bound()
-        // counter is evaluated before intent: both fail, counter is the reason
+        // counter_format is evaluated before intent: both fail, counter_format is the reason
         guard var p = F.pcactn(g, F.theIntent(["goal_salt": .string("wrong")])).asObject else { return XCTFail("obj") }
         p["counter"] = .int(-1)
         p.removeValue(forKey: "sig")
@@ -185,8 +185,8 @@ final class IntentKillTests: XCTestCase {
         p["sig"] = .string(Base64URLStrict.encode(Array(sig)))
         let v = F.verify(.object(p), g)
         XCTAssertFalse(v.allow); XCTAssertEqual(v.checks.count, 10)
-        XCTAssertEqual(v.checks["counter"], false); XCTAssertEqual(v.checks["intent"], false)
-        XCTAssertTrue(v.reason.hasPrefix("counter: "), v.reason)
+        XCTAssertEqual(v.checks["counter_format"], false); XCTAssertNil(v.checks["counter"]); XCTAssertEqual(v.checks["intent"], false)
+        XCTAssertTrue(v.reason.hasPrefix("counter_format: "), v.reason)
         // a wire failure never reports intent, even under an active policy
         mustWire("wire beats policy", F.verify(F.pcactn(g, F.theIntent(["fidelity_ppm": .int(-1)])), g, IntentPolicy(require: true)))
         // every entry point threads the policy

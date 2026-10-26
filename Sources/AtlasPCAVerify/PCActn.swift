@@ -2,7 +2,7 @@ import Foundation
 
 /// The CORE PCActn verifier (wire format v2). Byte-matches `@atlasauth/pca` and the Rust / Go / .NET
 /// verifiers. Checks, in the normative order: wire (terminal), version, audience, validity, chain,
-/// plan_inclusion, leaf_signature, counter (then `intent` when the PCActn carries it). Later-milestone checks (attestation, threshold, revocation, …)
+/// plan_inclusion, leaf_signature, counter_format (then `intent` when the PCActn carries it). Later-milestone checks (attestation, threshold, revocation, …)
 /// are out of scope for the core verdict.
 public enum PCA {
     public static let WIRE_VERSION: Int64 = 2
@@ -15,7 +15,7 @@ public enum PCA {
 
     /// Verdict for the core checks. `checks[name]` is true when it passed. A wire failure is terminal and is
     /// the ONLY entry (`["wire": false]`); otherwise all eight checks are present. `allow` == every check true.
-    public struct Verdict {
+    public struct Verdict: Sendable {
         public let allow: Bool
         public let checks: [String: Bool]
         public let reason: String
@@ -64,7 +64,7 @@ public enum PCA {
     }
 
     /// `allowedSuites`: optional verifier suite policy (nil = none; an empty list refuses everything). Absent `alg` == "ed25519".
-    /// `intentPolicy`: optional Intent Layer M2 policy (nil = none). The `intent` check runs after `counter` and is
+    /// `intentPolicy`: optional Intent Layer M2 policy (nil = none). The `intent` check runs after `counter_format` and is
     /// reported iff the PCActn carries `intent` or the policy is active; otherwise the verdict is the pre-M2 one.
     public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
         if let why = Wire.validate(pcactn) { return wireFail(why) }
@@ -154,9 +154,9 @@ public enum PCA {
         }
         record("leaf_signature", sigOk, leafWhy)
 
-        // counter: safe integer >= 0
+        // counter_format: safe integer >= 0 (the stateful replay check belongs to `PCA.authorize`)
         let counterOk = (p["counter"]?.safeInt).map { $0 >= 0 } ?? false
-        record("counter", counterOk, "missing or not a non-negative safe integer")
+        record("counter_format", counterOk, "missing or not a non-negative safe integer")
 
         // Intent Layer M2: `intent` (reported iff the PCActn carries `intent` or the policy is active)
         let session = p["intent_session"]?.get("session")?.asString

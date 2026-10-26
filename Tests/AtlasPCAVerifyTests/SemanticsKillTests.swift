@@ -5,7 +5,7 @@ import XCTest
 /// registered pq_pk length, the unsigned `threshold` slot staying outside the strict-canonical body, field folding of
 /// non-canonical sums.
 final class SemanticsKillTests: XCTestCase {
-    static let ORDER = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter", "intent",
+    static let ORDER = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format", "intent",
                         // the Intent Layer v2 checks, in the reference pipeline order (intent-v2.ts)
                         "schema", "intent_session", "layers", "accumulators", "map", "facts", "provenance", "classes"]
 
