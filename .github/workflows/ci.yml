@@ -42,6 +42,26 @@ jobs:
         run: swift build
       - name: Tests + conformance corpus
         run: swift test
+      # the native parity families (0.5): ternary decision + signed escalation answers (83 vectors, every suite this build verifies),
+      # rules 20-21 end to end through authorize (model-rules-vectors), the signed passport (software table + hardware table through
+      # the real vendor verifiers), Track 3 (intent-state, ledger, optimistic, mesh), the goal vectors and the attestation verifiers.
+      # A missing vector file FAILS (it is never skipped): attestation-evidence-vectors.json and the passport_hardware_vectors table
+      # are produced by the TypeScript reference (tsx scripts/gen-conformance-attestation.ts / gen-conformance-passport.ts).
+      - name: Parity vector files are vendored
+        run: |
+          for f in decision-vectors.json model-rules-vectors.json passport-vectors.json intent-state-vectors.json ledger-vectors.json optimistic-vectors.json mesh-vectors.json attestation-evidence-vectors.json; do
+            test -s "conformance/$f" || { echo "::error::conformance/$f is missing"; exit 1; }
+          done
+          test -s conformance/goal/index.json || { echo "::error::conformance/goal/index.json is missing"; exit 1; }
+          grep -q '"passport_hardware_vectors"' conformance/passport-vectors.json || { echo "::error::passport-vectors.json has no passport_hardware_vectors table"; exit 1; }
+      - name: Decision, escalation answers and model-rules (rules 20-21 through authorize)
+        run: swift test --filter 'DecisionConformanceTests|EscalationTests|ModelRulesVectorTests'
+      - name: Signed passport (software + hardware vectors)
+        run: swift test --filter PassportConformanceTests
+      - name: Track 3 vectors (intent state, ledger, optimistic, mesh) and goal vectors
+        run: swift test --filter 'IntentStateVectorTests|ExtensionVectorTests|MeshVectorTests|GoalVectorTests'
+      - name: Attestation verifiers (vendor vectors, strict X.509, fail-closed tables)
+        run: swift test --filter 'AttestVectorTests|AttestFailClosedTests'
 
   linux:
     name: swift test (linux)
@@ -59,3 +79,18 @@ jobs:
       - name: Tests + conformance corpus (ML-DSA via liboqs)
         working-directory: ${{ env.MONO }}/sdks/swift-pca
         run: swift test --filter AtlasPCAVerifyTests
+      - name: Parity vector files are present
+        run: |
+          for f in decision-vectors.json model-rules-vectors.json passport-vectors.json intent-state-vectors.json ledger-vectors.json optimistic-vectors.json mesh-vectors.json attestation-evidence-vectors.json; do
+            test -s "$MONO/packages/pca/conformance/$f" || { echo "::error::packages/pca/conformance/$f is missing"; exit 1; }
+          done
+          grep -q '"passport_hardware_vectors"' "$MONO/packages/pca/conformance/passport-vectors.json" || { echo "::error::no passport_hardware_vectors table"; exit 1; }
+      - name: Decision, escalation answers and model-rules (rules 20-21 through authorize)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'DecisionConformanceTests|EscalationTests|ModelRulesVectorTests'
+      - name: Signed passport + Track 3 + goal vectors
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'PassportConformanceTests|IntentStateVectorTests|ExtensionVectorTests|MeshVectorTests|GoalVectorTests'
+      - name: Attestation verifiers (vendor vectors, strict X.509, fail-closed tables)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'AttestVectorTests|AttestFailClosedTests'

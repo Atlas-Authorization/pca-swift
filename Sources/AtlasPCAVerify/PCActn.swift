@@ -2,7 +2,7 @@ import Foundation
 
 /// The CORE PCActn verifier (wire format v2). Byte-matches `@atlasauth/pca` and the Rust / Go / .NET
 /// verifiers. Checks, in the normative order: wire (terminal), version, audience, validity, chain,
-/// plan_inclusion, leaf_signature, counter (then `intent` when the PCActn carries it). Later-milestone checks (attestation, threshold, revocation, …)
+/// plan_inclusion, leaf_signature, counter_format (then `intent` when the PCActn carries it). Later-milestone checks (attestation, threshold, revocation, …)
 /// are out of scope for the core verdict.
 public enum PCA {
     public static let WIRE_VERSION: Int64 = 2
@@ -15,10 +15,22 @@ public enum PCA {
 
     /// Verdict for the core checks. `checks[name]` is true when it passed. A wire failure is terminal and is
     /// the ONLY entry (`["wire": false]`); otherwise all eight checks are present. `allow` == every check true.
-    public struct Verdict {
+    public struct Verdict: Sendable {
         public let allow: Bool
         public let checks: [String: Bool]
         public let reason: String
+        /// EVERY failing check's reason, in evaluation order (`reason` is the first). The ternary decision reads this full set.
+        public let reasons: [String]
+        /// A passing `tighten` check rests on `model_polarity: legacy` (a grant reads a model-derived path): report as degraded.
+        public let legacyModelPolarity: Bool
+
+        public init(allow: Bool, checks: [String: Bool], reason: String, reasons: [String]? = nil, legacyModelPolarity: Bool = false) {
+            self.allow = allow
+            self.checks = checks
+            self.reason = reason
+            self.reasons = reasons ?? (reason.isEmpty ? [] : [reason])
+            self.legacyModelPolarity = legacyModelPolarity
+        }
     }
 
     /// This verifier's own audience, compared to the PCActn's signed `aud` (mirrors `pcactn.ts`):
@@ -64,7 +76,7 @@ public enum PCA {
     }
 
     /// `allowedSuites`: optional verifier suite policy (nil = none; an empty list refuses everything). Absent `alg` == "ed25519".
-    /// `intentPolicy`: optional Intent Layer M2 policy (nil = none). The `intent` check runs after `counter` and is
+    /// `intentPolicy`: optional Intent Layer M2 policy (nil = none). The `intent` check runs after `counter_format` and is
     /// reported iff the PCActn carries `intent` or the policy is active; otherwise the verdict is the pre-M2 one.
     public static func verify(pcactn: JSONValue, grant: JSONValue, now: Int64, audience: Audience, allowedSuites: [String]? = nil, intentPolicy: IntentPolicy? = nil, intentV2: IntentV2Context? = nil) -> Verdict {
         if let why = Wire.validate(pcactn) { return wireFail(why) }
@@ -72,9 +84,14 @@ public enum PCA {
 
         var checks: [String: Bool] = [:]
         var reason = ""
+        var reasons: [String] = []
         func record(_ name: String, _ ok: Bool, _ why: @autoclosure () -> String) {
             checks[name] = ok
-            if !ok && reason.isEmpty { reason = "\(name): \(why())" }
+            if !ok {
+                let r = "\(name): \(why())"
+                reasons.append(r)
+                if reason.isEmpty { reason = r }
+            }
         }
 
         checks["wire"] = true
@@ -154,9 +171,9 @@ public enum PCA {
         }
         record("leaf_signature", sigOk, leafWhy)
 
-        // counter: safe integer >= 0
+        // counter_format: safe integer >= 0 (the stateful replay check belongs to `PCA.authorize`)
         let counterOk = (p["counter"]?.safeInt).map { $0 >= 0 } ?? false
-        record("counter", counterOk, "missing or not a non-negative safe integer")
+        record("counter_format", counterOk, "missing or not a non-negative safe integer")
 
         // Intent Layer M2: `intent` (reported iff the PCActn carries `intent` or the policy is active)
         let session = p["intent_session"]?.get("session")?.asString
@@ -168,11 +185,12 @@ public enum PCA {
         // Intent Layer v2, in order: schema (rule 14), intent_session (13), layers (V5), accumulators (15), facts (16),
         // provenance (17), classes (18); each reported only when the PCActn carries `intent_session` or a v2 policy is
         // active (IntentV2.swift). Absent both, the verdict is the pre-v2 one.
-        for c in IntentV2.decide(p, grant: grant, ctx: intentV2, now: now).checks {
+        let v2 = IntentV2.decide(p, grant: grant, ctx: intentV2, now: now)
+        for c in v2.checks {
             record(c.name, c.ok, c.reason)
         }
 
         let allow = checks.values.allSatisfy { $0 }
-        return Verdict(allow: allow, checks: checks, reason: reason)
+        return Verdict(allow: allow, checks: checks, reason: reason, reasons: reasons, legacyModelPolarity: v2.legacy)
     }
 }
