@@ -82,7 +82,8 @@ enum IntentV2 {
         if !optObj(pol) { return "policy must be an object" }
         if case let .object(po)? = pol {
             // closed member sets; every flag a JSON boolean and every number a non-negative safe integer when present
-            for k in po.keys where !["session", "schema", "acc", "map"].contains(k.s) { return "policy: unknown member '\(k.s)'" }
+            for k in po.keys where !["session", "schema", "acc", "map", "model_polarity"].contains(k.s) { return "policy: unknown member '\(k.s)'" }
+            if let mp = po["model_polarity"], mp.asString != "strict" && mp.asString != "legacy" { return "policy.model_polarity must be 'strict' or 'legacy'" }
             if let pa = po["acc"] {
                 guard case let .object(o) = pa else { return "policy.acc must be an object" }
                 for k in o.keys where k.s != "max_receipt_age_s" && k.s != "max_keyset_age_s" { return "policy.acc: unknown member '\(k.s)'" }
@@ -107,6 +108,7 @@ enum IntentV2 {
             }
         }
         if !optObj(o["params"]) { return "params must be an object" }
+        if !optObj(o["env"]) { return "env must be an object" }
         for k in ["schema", "session", "acc"] where !optObj(o[JKey(k)]) { return "\(k) must be an object" }
         if let L = o["layers"] {
             guard case let .object(lo) = L else { return "layers must be an object" }
@@ -412,18 +414,20 @@ enum IntentV2 {
     }
 
     /// `decideIntentV2`: the v2 checks in order, each reported only under its condition; never traps.
-    static func decide(_ p: JObject, grant: JSONValue, ctx ctxIn: IntentV2Context?, now nowI: Int64) -> (checks: [Check], env: IntentV2Env?) {
+    static func decide(_ p: JObject, grant: JSONValue, ctx ctxIn: IntentV2Context?, now nowI: Int64) -> (checks: [Check], env: IntentV2Env?, legacy: Bool) {
         let ctx = ctxIn?.value
         let now = Double(nowI)
         var checks: [Check] = []
         var env: IntentV2Env?
+        var schemaDoc: JSONValue?
+        var singleSource: [String] = []
         func run(_ name: String, _ s: Step) { checks.append(Check(name: name, ok: s == nil, reason: s ?? "")) }
         let present = p["intent_session"] != nil
         if let ce = contextError(ctx) {
             // a malformed verifier context fails closed: every v2 check that could be reported fails with the reason
             let committed = present && IV.same(p["intent_session"]?.get("map_form")?.asString, IntentMap.FORM_COMMIT)
             for name in ["schema", "intent_session"] + (present ? ["accumulators"] : []) + (committed ? ["map"] : []) { run(name, "malformed v2 context: \(ce)") }
-            return (checks, nil)
+            return (checks, nil, false)
         }
         // the verifier clock: a safe integer, else every v2 check run here fails closed
         let clockOk = IV.isSafeDouble(now) && nowI >= -Canonical.MAX_SAFE && nowI <= Canonical.MAX_SAFE
@@ -434,6 +438,7 @@ enum IntentV2 {
             if s == nil, let d = doc, case let .object(params)? = ctx?.get("params") {
                 env = IntentV2Env(canon: ActionSchema.canonProjection(d, verb: actionString(p, "verb"), params: params))
             }
+            if s == nil { schemaDoc = doc }
             run("schema", s)
         }
         if present || pol?.get("session")?.get("require") == .bool(true) {
@@ -479,6 +484,7 @@ enum IntentV2 {
                 if status == "pass" { run(name, nil) }
                 else { run(name, status == "question" ? "intent_required: \(wb.reason ?? "a question is required")" : (wb.reason ?? "rejected")) }
             }
+            singleSource = wb.singleSource
             if wb.outcome != "deny" {
                 var e = env ?? IntentV2Env()
                 if let w = wb.world { e.world = w }
@@ -489,7 +495,62 @@ enum IntentV2 {
         } else if mapActive {
             run("map", step(mapStep(p, ctx)))
         }
-        return (checks, env)
+        // rules 20 and 21, last (the verifier-computed env is complete)
+        var legacy = false
+        for c in modelRules(p, grant: grant, ctx: ctx, env: env, schemaDoc: schemaDoc, singleSource: singleSource, action: action, now: now) {
+            if let l = c.legacy, l { legacy = true }
+            checks.append(c.check)
+        }
+        return (checks, env, legacy)
+    }
+
+    /// The predicate lists a model-derived path could widen: the grant's allow-list and the ceilings (V5 layers).
+    static func allowSidePredicates(_ env: JSONValue?, _ ctx: JSONValue?) -> [JSONValue] {
+        var lists: [JSONValue] = [env?.get("predicates") ?? .null]
+        for k in ["org", "site", "std"] { lists.append(ctx?.get("layers")?.get(k)?.get("predicates") ?? .null) }
+        return lists
+    }
+
+    /// Rules 20 (`units`: reported iff `envelope.units` is present) and 21 (`tighten`: reported iff `envelope.tighten` or a
+    /// `model_polarity` is present, or a grant-side `where` reads a model-derived env path). Both read the signed ENVELOPE of
+    /// the stored grant; a PCActn with none of these verifies exactly as without the two rules.
+    static func modelRules(_ p: JObject, grant: JSONValue, ctx: JSONValue?, env: IntentV2Env?, schemaDoc: JSONValue?, singleSource: [String],
+                           action: JSONValue, now: Double) -> [(check: Check, legacy: Bool?)] {
+        var out: [(check: Check, legacy: Bool?)] = []
+        let envelope = PCA.readEnvelope(grant)
+        let preds = allowSidePredicates(envelope, ctx)
+        if let units = envelope?.get("units") {
+            var s: Step
+            var doc = schemaDoc
+            if doc == nil {
+                let r = schemaStep(p, ctx)
+                s = r.0
+                doc = r.1
+            } else { s = nil }
+            if s == nil, let d = doc {
+                let verb = actionString(p, "verb")
+                var input: JObject = ["units": units, "verb": .string(verb), "predicates": .array(preds)]
+                if let su = d.get("units") { input["schema_units"] = su }
+                if let vp = ActionSchema.verb(d, verb)?["params"] { input["verb_params"] = vp }
+                let r = PCA.decideUnits(.object(input))
+                s = r.ok ? nil : r.reason
+            }
+            out.append((Check(name: "units", ok: s == nil, reason: s ?? ""), nil))
+        }
+        let polPolicy = ctx?.get("policy")?.get("model_polarity")
+        var polarity: JSONValue? = envelope?.get("model_polarity")
+        if let pp = polPolicy { polarity = pp.asString == "strict" ? nil : pp }
+        if envelope?.get("tighten") != nil || polarity != nil || polPolicy != nil || !PCA.modelPathsRead(preds, single: singleSource).isEmpty {
+            var cenv: JObject = ctx?.get("env")?.asObject ?? [:]
+            for (k, v) in env?.json.asObject ?? [:] { cenv[k] = v }
+            var input: JObject = ["predicates": .array(preds), "single_source": .array(singleSource.map { .string($0) }),
+                                  "context": .object(["action": action, "env": .object(cenv)])]
+            if let t = envelope?.get("tighten") { input["tighten"] = t }
+            if let pl = polarity { input["polarity"] = pl }
+            let r = PCA.decideTighten(.object(input))
+            out.append((Check(name: "tighten", ok: r.outcome == "ok", reason: r.outcome == "ok" ? "" : (r.reason ?? "refused")), r.legacy))
+        }
+        return out
     }
 }
 

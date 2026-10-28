@@ -56,8 +56,87 @@ if verdict.allow {
 ```
 
 `verdict.checks` reports each core check (`wire`, `version`, `audience`, `validity`, `chain`,
-`plan_inclusion`, `leaf_signature`, `counter`). Every check is **fail-closed** — the action is allowed
+`plan_inclusion`, `leaf_signature`, `counter_format`). Every check is **fail-closed** — the action is allowed
 only if none reports failure — and a `wire` failure is terminal (nothing else is evaluated).
+
+## Authorize an operation
+
+`PCA.authorize` is the full decision for one operation. It runs the core checks, then binds the proof to the operation
+your code will execute (the signed verb, resource and params digest must equal it, so a proof signed for $50 cannot pay
+$400), evaluates the grant's envelope predicates (default deny), the envelope's caveats, caveats placed on the root grant
+and caveats added by delegation (`max_spend`, `predicates`, `tool_schema`, `expires`, `rate`, ...; an unknown type is
+refused), checks revocation with your `isRevoked`, and consumes the replay counter through an atomic store, only when
+everything else passed.
+
+<!-- pca-readme-sample: authorize -->
+```swift
+import AtlasPCAVerify
+
+let replayStore = MemoryStateStore() // one process; several processes need a shared store (see below)
+
+/// POST /payments: `pcactnText` is the PCActn the agent presented, `body` the request body.
+func sendPayment(pcactnText: String?, body: String, grants: [String: JSONValue],
+                 revokedGrantIds: Set<String>) -> (status: Int, message: String) {
+    guard let params = JSONValue.parse(body) else { return (400, "the body is not JSON") }
+    // What this handler will execute, from its own route and body (never from the PCActn).
+    let operation = PCA.Operation(verb: "payments.send", resource: "payments/acme", params: params)
+    let result = PCA.authorize(json: pcactnText, PCA.AuthorizeInput(
+        operation: operation,
+        audience: "payments-rs",
+        resolveGrant: { ref in grants[ref] }, // grant_ref -> grant, from your own store
+        stateStore: replayStore,
+        isRevoked: { _, grant in
+            guard case let .object(g) = grant, case let .string(id)? = g["id"] else { return nil } // nil denies
+            return revokedGrantIds.contains(id)
+        },
+        plan: PCA.SINGLE_STEP))
+    guard result.allow else {
+        return (result.status, result.reason ?? "denied") // e.g. 403 "policy: caveat(s) not satisfied: max_spend"
+    }
+    // ... send the payment with exactly `params` ...
+    return (200, "paid")
+}
+```
+
+- `PCA.SINGLE_STEP` accepts a proof whose plan is this one operation. For a multi-step plan, return an
+  `AuthorizeContext(plan:, planAuthorized: true)` from `context`.
+- `result.status` is 200, 401 (no proof, or one that fails authentication) or 403. `result.checks` maps every check to
+  `.pass`, `.fail` or `.notEnforced`, and `result.reason` is the decisive failure. On success `result.operation` is the
+  bound operation (verb, resource, params digest, and an `id` for the proof), and
+  `PCA.isAuthorized(result, for: operation)` re-checks it where the side effect runs.
+- The operation comes from your own routing and parsed request, never from the proof. Its params must be a JSON object.
+- Every component is required: without `audience`, `resolveGrant`, `stateStore`, `isRevoked` or `operation` the call is
+  refused and `result.missing` names what is absent. `authorize` never throws: an internal error is a denial. Only an
+  `isRevoked` that returns `false` passes (`true`, `nil` or a throw denies).
+- `MemoryStateStore` is for a single process. A shared deployment implements `PCAStateStore.claim(key:counter:)` as ONE
+  atomic operation of its database (insert, or update only when the new counter is greater) and returns
+  `ClaimResult(ok:lastCounter:)`. There is no HTTP middleware in this package: call `authorize` where you handle the request.
+- The check names: `counter_format` is the stateless well-formed-counter check of the core verifier; `replay` is the
+  stateful check `authorize` adds (the counter must be strictly greater than the last one the store saw). The required
+  list is `counter_format, replay, revocation, plan_root_authorized, audience, validity, grant_ref_bound, operation,
+  params_digest, policy` plus `AuthorizeInput.require`; an entry `counter` in `require` is an alias of `replay`.
+- A refusal of an envelope limit names the limit: `policy: amount <= 100 not satisfied for payments.send on payments/acme`
+  (`currency in ["usd", "eur"]`, `approval present`, `all of (...)`). When no predicate covers the verb and resource the
+  reason stays `policy: no predicate permits <verb> on <resource>`; an empty list stays `envelope grants no predicates`.
+- A replay is `replay: 1 is not greater than last seen 1 (replay)`.
+- Not covered by `authorize` here: the risk score, trust budget and threshold co-signature from the grant's
+  `risk_policy`, revocation epochs and liveness beacons. A grant that pins the agent (`agent_binding`) needs an
+  attestation verifier and is refused, and so is a proof carrying `zk_compliance`. The TypeScript `authorize` covers
+  these.
+
+### Which entry point to use
+
+There is no HTTP middleware in this package. `PCA.authorize` is the recommended entry point: call it where you handle the
+request. The core verifier (`PCA.verify`) is signature-only: it checks the signature, chain, audience, validity and counter
+format, and nothing about the operation, predicates, caveats, revocation or replay.
+
+### Upgrading to 0.5
+
+- The core check `counter` is `counter_format` (in `verdict.checks` and in its failure reason
+  `counter_format: missing or not a non-negative safe integer`). The stateful check in `authorize` results is `replay`, and
+  its reasons start with `replay:`. Rename any code that reads `checks["counter"]`. `PCA.DEFAULT_REQUIRED_CHECKS` lists the
+  new names.
+- An envelope-limit refusal now names the limit instead of `no predicate permits ...`.
 
 ## Step-up co-sign (principal device)
 
@@ -85,6 +164,17 @@ are Ed25519. The key is therefore a **software key**, stored in the Keychain as
 `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (OS-encrypted, not synced or backed up, unreadable while
 locked) but **not hardware-bound**. Gate `approve` behind a LocalAuthentication (Face ID) prompt for user
 presence.
+
+## What a passing result does not cover
+
+`counter_format: pass` is a format check (a non-negative integer); it does **not** mean the action was not replayed.
+Verification is stateless and this package has no replay store, so the resource server must persist, per grant and
+agent, the last accepted counter and refuse anything not strictly greater, atomically across all of its processes.
+
+The verifier is the core verifier only (this package has no HTTP middleware). It does not check replay, revocation, caveats, envelope predicates, plan authorization, risk or
+thresholds, and it does not compare the request body with the signed `params_digest`. Do those checks in your
+handler (the caveat helpers, the params digest of the body you will execute, your replay and revocation stores), or
+delegate the decision to a full verifier such as `requirePCA` from `@atlasauth/pca`.
 
 ## Conformance
 

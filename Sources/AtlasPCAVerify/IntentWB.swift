@@ -730,6 +730,7 @@ enum IntentWB {
         var world: JObject?
         var prov: JObject?
         var cls: JObject?
+        var singleSource: [String] = [] // worlds decided by ONE oracle (rule 21: env.world.<name> is then model-derived)
         var reason: String?
     }
 
@@ -755,6 +756,7 @@ enum IntentWB {
             if !w.ok { out.outcome = "deny"; out.checks = [("facts", "fail")]; out.reason = w.reason; return out }
             out.checks.append(("facts", "pass"))
             out.world = w.world
+            out.singleSource = w.singleSource
         }
         let provPolicy = policy?.get("provenance")
         if provenanceActive(prov: s.get("prov"), labels: s.get("labels"), policy: provPolicy) {
