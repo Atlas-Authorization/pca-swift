@@ -7,7 +7,7 @@ import Foundation
 /// every boundary pinned on both sides, the reporting conditions, the check order and the independence of checks 1-4.
 final class IntentV2KillTests: XCTestCase {
     typealias F = V2F
-    static let CORE = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"]
+    static let CORE = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"]
     static let V2 = ["schema", "intent_session", "accumulators"]
 
     func failing(_ v: PCA.Verdict) -> Set<String> { Set(v.checks.filter { !$0.value }.map { $0.key }) }
