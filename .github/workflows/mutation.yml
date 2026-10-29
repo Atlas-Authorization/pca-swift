@@ -2,7 +2,8 @@ name: Mutation
 
 # Mutation testing of AtlasPCAVerify with the operator mutator in the flagship (tools/pca-audit/swift-mutate; oracle =
 # swift test AtlasPCAVerifyTests incl. the full adversarial corpus) over every file of Sources/AtlasPCAVerify (incl. the
-# Intent Layer v2 ones), split into 24 shards (every 24th mutant; 8 shards took 30-45 min each on the 0.4.1 sources, a
+# Intent Layer v2 ones and every mN module: staleness, operations, plans, assurance, guard, store conformance) and of
+# Sources/AtlasPCASQLite (oracle AtlasPCASQLiteTests), split into 24 shards (every 24th mutant; 8 shards took 30-45 min each on the 0.4.1 sources, a
 # third of the current ones). Runs on Linux
 # like the ledgered runs: linux-prep.sh builds the package against swift-crypto and liboqs (ML-DSA-65), so the
 # post-quantum vectors really run. The merge job checks the survivors against the equivalent-mutant ledger: it passes when
@@ -43,6 +44,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
+# Actions.swift (action kit) is mutated with every other Sources file; ActionsVectorTests (shared vectors, flagship layout) is part of the suite.
 env:
   CRATE: swift-pca
   SHARDS: '24'
@@ -64,7 +66,7 @@ jobs:
         run: .github/scripts/mutation-layout.sh "$CRATE"
       - name: Snapshot
         run: |
-          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          ls Sources/AtlasPCAVerify/*.swift Sources/AtlasPCASQLite/*.swift > "$RUNNER_TEMP/src.txt"
           node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
             --corpus-root="$MONO" --out=mut-snapshot --cfg="$MUT_CFG" \
             --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
@@ -89,6 +91,8 @@ jobs:
           node-version: 22
       - name: Flagship tooling + source layout
         run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: SQLite headers (the AtlasPCASQLite target builds with the package)
+        run: sudo apt-get install -y -qq libsqlite3-dev
       - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA-65)
         working-directory: ${{ env.MONO }}
         run: |
@@ -100,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASELINE: ${{ inputs.baseline_run }}
         run: |
-          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          ls Sources/AtlasPCAVerify/*.swift Sources/AtlasPCASQLite/*.swift > "$RUNNER_TEMP/src.txt"
           node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
             --corpus-root="$MONO" --out="$RUNNER_TEMP/snap" --cfg="$MUT_CFG" \
             --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
@@ -115,7 +119,7 @@ jobs:
             mkdir -p "$TMPDIR/swiftmut/w$w/sdks/swift-pca"
             ln -sfn "$MONO/sdks/swift-pca/conformance" "$TMPDIR/swiftmut/w$w/sdks/swift-pca/conformance"
           done
-          FILES="$(cd sdks/swift-pca && ls Sources/AtlasPCAVerify/*.swift | tr '\n' ' ')"
+          FILES="$(cd sdks/swift-pca && ls Sources/AtlasPCAVerify/*.swift Sources/AtlasPCASQLite/*.swift | tr '\n' ' ')"
           node tools/pca-audit/swift-mutate/mutate.mjs run "$WORKERS" 320 "$RUNNER_TEMP/raw.json" $FILES \
             --every="$SHARDS" --offset=$(( ${{ matrix.shard }} - 1 )) ${BASE_POOL:+--carry="$BASE_POOL"}
           # the next run's baseline: this slice's results (carried ones included)

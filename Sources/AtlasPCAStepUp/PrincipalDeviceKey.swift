@@ -73,7 +73,7 @@ public struct PrincipalDeviceKey: Sendable {
     }
 }
 
-/// In-memory store, for tests and previews only.
+/// In-memory store, for tests and demos only.
 public final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Data?
