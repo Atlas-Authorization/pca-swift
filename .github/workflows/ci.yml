@@ -7,6 +7,9 @@ name: CI
 # swift test (linux) builds AtlasPCAVerify + its tests the way the Linux mutation shards do (the flagship's
 # tools/pca-audit/swift-mutate/linux-prep.sh: swift-crypto for CryptoKit, liboqs for ML-DSA), so a test or source that only
 # builds against CryptoKit fails here and not first in a 24-shard Mutation run.
+# The 0.5 native-parity families (goal binding v3, revocation staleness, operation records, plan lifecycle, assurance labels) replay the
+# shared vector files; the request guard, the SQLite stores and the store-conformance helper have their own steps. The Vapor and
+# Hummingbird integrations are separate packages (Integrations/AtlasPCA*) with their own jobs below; the core package stays dependency-free.
 on:
   push:
     branches: [main, 'ci/**']
@@ -42,6 +45,81 @@ jobs:
         run: swift build
       - name: Tests + conformance corpus
         run: swift test
+      - name: Agent-side signing (producer vectors byte for byte, TS PCActns verified, native round trips; ML-DSA refused as unsupported_suite below OS 26)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          test -s conformance/producer-vectors.json
+          swift test --filter 'ProducerVectorsTests|Ed25519DeterministicTests'
+          # ML-DSA signs on OS 26 and later only: there the post-quantum PCActn must have been written
+          if [ "$(sw_vers -productVersion | cut -d. -f1)" -ge 26 ]; then test -s "$PCA_PRODUCER_OUT"; fi
+        env:
+          PCA_PRODUCER_OUT: ${{ runner.temp }}/producer-native-swift.json
+      # the post-quantum PCActn this SDK produced (randomised signature): the reference implementation verifies it
+      # (packages/pca/conformance/producer-native/, producer-native.test.ts)
+      - name: Upload the post-quantum PCActn for the reference
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: producer-native-swift
+          path: ${{ runner.temp }}/producer-native-swift.json
+          if-no-files-found: error
+      # the native parity families (0.5): ternary decision + signed escalation answers (83 vectors, every suite this build verifies),
+      # rules 20-21 end to end through authorize (model-rules-vectors), the signed passport (software table + hardware table through
+      # the real vendor verifiers), Track 3 (intent-state, ledger, optimistic, mesh), the goal vectors and the attestation verifiers.
+      # A missing vector file FAILS (it is never skipped): attestation-evidence-vectors.json and the passport_hardware_vectors table
+      # are produced by the TypeScript reference (tsx scripts/gen-conformance-attestation.ts / gen-conformance-passport.ts).
+      - name: Parity vector files are vendored
+        run: |
+          for f in decision-vectors.json model-rules-vectors.json passport-vectors.json intent-state-vectors.json ledger-vectors.json optimistic-vectors.json mesh-vectors.json attestation-evidence-vectors.json goal-commit-vectors.json operation-vectors.json plan-vectors.json staleness-vectors.json assurance-vectors.json caveat-lang-vectors.json forbid-certificate-vectors.json policy-link-vectors.json k3-vectors.json fresh-at-vectors.json pca-grant-vectors.json blueprint-vectors.json a2a-vectors.json k4-vectors.json workflow-vectors.json readside-vectors.json lease-vectors.json obligations-vectors.json break-glass-vectors.json missing-context-vectors.json policy-classes-vectors.json provenance-vectors.json sigstore-vectors.json; do
+            test -s "conformance/$f" || { echo "::error::conformance/$f is missing"; exit 1; }
+          done
+          test -s conformance/goal/index.json || { echo "::error::conformance/goal/index.json is missing"; exit 1; }
+          grep -q '"passport_hardware_vectors"' conformance/passport-vectors.json || { echo "::error::passport-vectors.json has no passport_hardware_vectors table"; exit 1; }
+      - name: Decision, escalation answers, model-rules (rules 20-21 through authorize) and caveat language v2 (K1; caveat-lang-vectors.json, a missing file FAILS)
+        run: swift test --filter 'DecisionConformanceTests|EscalationTests|ModelRulesVectorTests|CaveatLangTests'
+      - name: Decision, escalation answers and model-rules (rules 20-21 through authorize)
+        run: swift test --filter 'DecisionConformanceTests|EscalationTests|ModelRulesVectorTests'
+      - name: Forbid-wins certificate and linked policy template vectors
+        run: swift test --filter PolicyAuthoringTests
+      - name: Signed passport (software + hardware vectors)
+        run: swift test --filter PassportConformanceTests
+      - name: Track 3 vectors (intent state, ledger, optimistic, mesh) and goal vectors
+        run: swift test --filter 'IntentStateVectorTests|ExtensionVectorTests|MeshVectorTests|GoalVectorTests'
+      - name: Attestation verifiers (vendor vectors, strict X.509, fail-closed tables)
+        run: swift test --filter 'AttestVectorTests|AttestFailClosedTests'
+      - name: Goal binding v3 vectors (goal-commit-vectors.json)
+        run: swift test --filter GoalCommitV3Tests
+      - name: Revocation staleness vectors (staleness-vectors.json) and the authorize wiring
+        run: swift test --filter RevocationStalenessTests
+      - name: Operation records (operation-vectors.json) and plan lifecycle (plan-vectors.json), concurrency, executor
+        run: swift test --filter 'OperationRecordTests|PlanLifecycleTests'
+      - name: Assurance labels (assurance-vectors.json) and the high-assurance gate
+        run: swift test --filter AssuranceTests
+      - name: Request guard (header and body transport, 401 vs 403, authorize by default, escalate never allow)
+        run: swift test --filter PcaGuardTests
+      - name: Store conformance helper and the SQLite stores (atomic claim, operation records, key/value)
+        run: swift test --filter 'StoreConformanceTests|SQLiteStoreTests'
+      - name: Step-up client
+        run: swift test --filter AtlasPCAStepUpTests
+      # K3 operational-plane artifacts (consistency tokens, policy bundles, decision log, list receipts and cursors, grant management)
+      # and the signed `fresh_at` PCActn member: exact codes, reasons and digests from the shared vectors.
+      - name: K3 artifacts and the fresh_at member
+        run: swift test --filter 'K3VectorTests|FreshAtVectorTests|PcaGrantVectorTests|BlueprintVectorTests|A2aVectorTests|K4VectorTests|K5VectorTests|K5VaultAggregateTests|WorkflowAuthorizeTests|WorkflowGuardTests|LeaseVectorTests|ObligationsVectorTests|BreakGlassVectorTests|MissingContextVectorTests|PolicyClassesVectorTests'
+      # provenance by default (check provenance_flow, always on) and undo windows: arg-provenance-vectors.json and undo-vectors.json
+      # replayed in full (a missing file FAILS, never skipped), the recorder, the authorize and guard gate, the undo admission hook
+      # and the mutation kills
+      - name: Provenance by default and undo windows
+        run: |
+          test -s conformance/arg-provenance-vectors.json || { echo "::error::conformance/arg-provenance-vectors.json is missing"; exit 1; }
+          test -s conformance/undo-vectors.json || { echo "::error::conformance/undo-vectors.json is missing"; exit 1; }
+          swift test --filter 'ArgProvVectorTests|ArgProvRecorderTests|ArgProvKillTests|ProvenanceFlowTests|UndoVectorTests|UndoKillTests|UndoAdmissionTests'
+      # action kit: every shared action vector (parse, digest, trait expansion, floor decision, pack root + proof, schema v2 integrity,
+      # v2 conformAction) must reproduce byte for byte; a missing vector directory FAILS (it is never skipped)
+      - name: actions-vectors
+        run: |
+          test -s conformance/actions/parse-gen-000.json || { echo "::error::conformance/actions is missing"; exit 1; }
+          swift test --filter ActionsVectorTests
 
   linux:
     name: swift test (linux)
@@ -51,6 +129,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Flagship tooling + source layout
         run: .github/scripts/mutation-layout.sh swift-pca
+      - name: SQLite headers (the AtlasPCASQLite target builds with the package)
+        run: sudo apt-get install -y -qq libsqlite3-dev
       - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA) + build incl. tests
         working-directory: ${{ env.MONO }}
         run: |
@@ -59,3 +139,145 @@ jobs:
       - name: Tests + conformance corpus (ML-DSA via liboqs)
         working-directory: ${{ env.MONO }}/sdks/swift-pca
         run: swift test --filter AtlasPCAVerifyTests
+      - name: Parity vector files are present
+        run: |
+          for f in decision-vectors.json model-rules-vectors.json passport-vectors.json intent-state-vectors.json ledger-vectors.json optimistic-vectors.json mesh-vectors.json attestation-evidence-vectors.json goal-commit-vectors.json operation-vectors.json plan-vectors.json staleness-vectors.json assurance-vectors.json caveat-lang-vectors.json k3-vectors.json fresh-at-vectors.json forbid-certificate-vectors.json policy-link-vectors.json workflow-vectors.json readside-vectors.json vault-aggregate-vectors.json authorize-workflow-fixtures.json; do
+            test -s "$MONO/packages/pca/conformance/$f" || { echo "::error::packages/pca/conformance/$f is missing"; exit 1; }
+          done
+          grep -q '"passport_hardware_vectors"' "$MONO/packages/pca/conformance/passport-vectors.json" || { echo "::error::no passport_hardware_vectors table"; exit 1; }
+      - name: Decision, escalation answers, model-rules (rules 20-21 through authorize) and caveat language v2 (K1; caveat-lang-vectors.json, a missing file FAILS)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'DecisionConformanceTests|EscalationTests|ModelRulesVectorTests|CaveatLangTests'
+      - name: Signed passport + Track 3 + goal vectors
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'PassportConformanceTests|IntentStateVectorTests|ExtensionVectorTests|MeshVectorTests|GoalVectorTests'
+      - name: Attestation verifiers (vendor vectors, strict X.509, fail-closed tables)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'AttestVectorTests|AttestFailClosedTests'
+      - name: Native parity vectors (goal v3, staleness, operation records, plan lifecycle, assurance)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'GoalCommitV3Tests|RevocationStalenessTests|OperationRecordTests|PlanLifecycleTests|AssuranceTests'
+      - name: Request guard
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter PcaGuardTests
+      - name: Store conformance helper and the SQLite stores
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'StoreConformanceTests|AtlasPCASQLiteTests'
+      - name: K3 artifacts and the fresh_at member
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: swift test --filter 'K3VectorTests|FreshAtVectorTests|PcaGrantVectorTests|BlueprintVectorTests|A2aVectorTests|K4VectorTests|K5VectorTests|K5VaultAggregateTests|WorkflowAuthorizeTests|WorkflowGuardTests|LeaseVectorTests|ObligationsVectorTests|BreakGlassVectorTests|MissingContextVectorTests|PolicyClassesVectorTests'
+      - name: Provenance by default and undo windows
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: |
+          test -s "$MONO/packages/pca/conformance/arg-provenance-vectors.json" || { echo "::error::arg-provenance-vectors.json is missing"; exit 1; }
+          test -s "$MONO/packages/pca/conformance/undo-vectors.json" || { echo "::error::undo-vectors.json is missing"; exit 1; }
+          swift test --filter 'ArgProvVectorTests|ArgProvRecorderTests|ArgProvKillTests|ProvenanceFlowTests|UndoVectorTests|UndoKillTests|UndoAdmissionTests'
+
+  # The framework integrations are separate packages that depend on the core by path. Each has its own job per platform: the macOS
+  # jobs build the core against CryptoKit (Xcode 26), the Linux jobs against the patched copy linux-prep.sh makes (swift-crypto, liboqs).
+  vapor-macos:
+    name: Vapor integration (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the core's MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: swift test (Integrations/AtlasPCAVapor)
+        working-directory: Integrations/AtlasPCAVapor
+        run: swift test
+
+  hummingbird-macos:
+    name: Hummingbird integration (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the core's MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: swift test (Integrations/AtlasPCAHummingbird)
+        working-directory: Integrations/AtlasPCAHummingbird
+        run: swift test
+
+  vapor-linux:
+    name: Vapor integration (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh swift-pca
+      - name: SQLite headers
+        run: sudo apt-get install -y -qq libsqlite3-dev
+      - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA) and the patched core
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: swift test (Integrations/AtlasPCAVapor)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca/Integrations/AtlasPCAVapor
+        run: swift test
+
+  hummingbird-linux:
+    name: Hummingbird integration (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh swift-pca
+      - name: SQLite headers
+        run: sudo apt-get install -y -qq libsqlite3-dev
+      - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA) and the patched core
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: swift test (Integrations/AtlasPCAHummingbird)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca/Integrations/AtlasPCAHummingbird
+        run: swift test
+
+  # The runnable example (examples/vapor-server): a Vapor server behind protect(), with an XCTVapor smoke test that sends a real signed
+  # proof (allowed once, then refused with a `doc` link). Own package, path dependencies on the core and the Vapor integration.
+  example-macos:
+    name: Vapor example (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the core's MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: swift test (examples/vapor-server)
+        working-directory: examples/vapor-server
+        run: swift test
+      - name: swift build (the Run executable)
+        working-directory: examples/vapor-server
+        run: swift build
+
+  example-linux:
+    name: Vapor example (linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh swift-pca
+      - name: SQLite headers
+        run: sudo apt-get install -y -qq libsqlite3-dev
+      - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA) and the patched core
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - name: swift test (examples/vapor-server)
+        working-directory: ${{ env.MONO }}/sdks/swift-pca/examples/vapor-server
+        run: swift test
