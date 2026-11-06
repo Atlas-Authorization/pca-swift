@@ -325,4 +325,77 @@ enum Predicates {
         let budget = SafeRegex.Budget()
         return ps.contains { predicateMatches($0, ctx, budget) }
     }
+
+    // ---- B6 (0.5): name the limit that was not met (TypeScript firstUnmetLimit / describeCondition / showValue) ----
+
+    static let OP_TEXT: [String: String] = [
+        "eq": "==", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">=", "in": "in", "nin": "not in", "prefix": "starts with",
+        "like": "like", "matches": "matches", "is_a": "is a", "member_of": "member of",
+    ]
+    static let MAX_SHOWN_STRING = 64
+    static let MAX_SHOWN_ITEMS = 8
+
+    /// A scalar operand in a denial reason: only safe integers, booleans, null and plain short strings are spelled out.
+    static func showValue(_ v: JSONValue?, _ depth: Int = 0) -> String {
+        switch v {
+        case .null?: return "null"
+        case let .bool(b)?: return b ? "true" : "false"
+        case .int?, .double?: return v?.safeInt.map { String($0) } ?? "<number>"
+        case let .string(s)?:
+            let plain = s.utf16.count <= MAX_SHOWN_STRING && s.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x22 && $0.value != 0x5c && $0.value <= 0xffff }
+            return plain ? "\"\(s)\"" : "\"...\""
+        case let .array(a)? where depth == 0:
+            return a.count <= MAX_SHOWN_ITEMS ? "[" + a.map { showValue($0, 1) }.joined(separator: ", ") + "]" : "[...]"
+        default: return "<value>"
+        }
+    }
+
+    /// The condition as the limit a reader recognises: `amount <= 500`, `currency in ["usd", "eur"]`.
+    static func describeCondition(_ c: JSONValue?, _ depth: Int = 0) -> String {
+        let o: JObject
+        switch c {
+        case let .object(x)?: o = x
+        case .array?: o = [:] // the reference treats an array as a leaf with no field or op
+        default: return "<condition>"
+        }
+        if isGroup(o) {
+            if depth >= 2 { return "(...)" }
+            func kids(_ a: [JSONValue]) -> String { a.prefix(MAX_SHOWN_ITEMS).map { describeCondition($0, depth + 1) }.joined(separator: "; ") }
+            if case let .array(a)? = o["all_of"] { return "all of (\(kids(a)))" }
+            if case let .array(a)? = o["any_of"] { return "any of (\(kids(a)))" }
+            if let n = o["not"] { return "not (\(describeCondition(n, depth + 1)))" }
+            return "<condition>"
+        }
+        let f = o["field"]?.asString ?? "<field>"
+        let name = IV.startsWith(f, "action.params.") ? IV.dropPrefix(f, "action.params.".unicodeScalars.count) : f
+        let op = o["op"]?.asString
+        if op == "exists" {
+            if case .bool(false)? = o["value"] { return "\(name) absent" }
+            return "\(name) present"
+        }
+        guard let t = op.flatMap({ OP_TEXT[$0] }) else { return "\(name) <condition>" }
+        if let r = o["ref"] { return "\(name) \(t) \(r.asString ?? "<ref>")" }
+        return "\(name) \(t) \(showValue(o["value"]))"
+    }
+
+    /// Inside an unmet top-level condition, the narrowest part that failed (an `all_of` points at its first unmet child).
+    static func narrowestUnmet(_ c: JSONValue, _ ctx: JSONValue, _ budget: SafeRegex.Budget, _ depth: Int = 0) -> JSONValue {
+        if depth < 4, case let .object(o) = c, isGroup(o), case let .array(xs)? = o["all_of"] {
+            for x in xs where conditionTri(x, ctx, budget) != .t { return narrowestUnmet(x, ctx, budget, depth + 1) }
+        }
+        return c
+    }
+
+    /// When a predicate's verb and resource are in scope but a `where` limit is not met, the narrowest unmet limit described;
+    /// nil when no predicate is in scope (the plain "no predicate permits" wording stays).
+    static func firstUnmetLimit(_ predicates: JSONValue?, _ ctx: JSONValue, _ budget: SafeRegex.Budget) -> String? {
+        guard case let .array(ps)? = predicates, let a = ctx.get("action"), let verb = a.get("verb")?.asString,
+              let resource = a.get("resource")?.asString else { return nil }
+        for p in ps {
+            guard case let .object(o) = p, verbMatches(o["verb"], verb), resourceMatches(o["resource"], resource, budget),
+                  case let .array(conds)? = o["where"] else { continue }
+            for c in conds where conditionTri(c, ctx, budget) != .t { return describeCondition(narrowestUnmet(c, ctx, budget)) }
+        }
+        return nil
+    }
 }

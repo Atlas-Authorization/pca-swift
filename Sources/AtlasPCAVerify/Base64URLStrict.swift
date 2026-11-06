@@ -14,7 +14,6 @@ enum Base64URLStrict {
 
     static func encode(_ bytes: [UInt8]) -> String {
         var out = [UInt8]()
-        out.reserveCapacity((bytes.count * 4 + 2) / 3)
         var i = 0
         while i < bytes.count {
             let b0 = UInt32(bytes[i])

@@ -1,5 +1,8 @@
 import Foundation
 import CryptoKit
+#if canImport(COQS)
+import COQS // a Linux build verifies through liboqs (tools/pca-audit/swift-mutate/linux-prep.sh adds the COQS shim target)
+#endif
 
 /// ML-DSA (FIPS-204) signature verification via CryptoKit's `MLDSA65` / `MLDSA87`, pure mode with an EMPTY context.
 /// Matches `pq.ts` (`@noble/post-quantum`'s `ml_dsa65` / `ml_dsa87`): ML-DSA-65 public key 1952 / signature 3309 bytes,
@@ -31,17 +34,22 @@ enum MLDSA {
     static func verify(_ level: Level, publicKey pk: [UInt8], message msg: [UInt8], signature sig: [UInt8]) -> Bool {
         let (pkLen, sigLen) = lens(level)
         guard pk.count == pkLen, sig.count == sigLen else { return false }
+        #if canImport(COQS)
+        // liboqs >= 0.12 (FIPS 204 final): plain verify is pure ML-DSA with the EMPTY context, as CryptoKit below
+        let lv: Int32 = level == .mlDsa65 ? 65 : 87
+        return msg.withUnsafeBufferPointer { mb in sig.withUnsafeBufferPointer { sb in pk.withUnsafeBufferPointer { pb in
+            atlas_mldsa_verify(lv, mb.baseAddress, mb.count, sb.baseAddress, sb.count, pb.baseAddress, pb.count) == 1 } } }
+        #else
         if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, macCatalyst 26.0, visionOS 26.0, *) {
             switch level {
-            case .mlDsa65:
-                guard let key = try? MLDSA65.PublicKey(rawRepresentation: Data(pk)) else { return false }
-                return key.isValidSignature(Data(sig), for: Data(msg))
-            case .mlDsa87:
-                guard let key = try? MLDSA87.PublicKey(rawRepresentation: Data(pk)) else { return false }
-                return key.isValidSignature(Data(sig), for: Data(msg))
+            case .mlDsa65: // an encoding CryptoKit refuses (nil) is not a valid signature
+                return (try? MLDSA65.PublicKey(rawRepresentation: Data(pk)))?.isValidSignature(Data(sig), for: Data(msg)) == true
+            case .mlDsa87: // an encoding CryptoKit refuses (nil) is not a valid signature
+                return (try? MLDSA87.PublicKey(rawRepresentation: Data(pk)))?.isValidSignature(Data(sig), for: Data(msg)) == true
             }
         }
         return false
+        #endif
     }
 
     static func verify(publicKey pk: [UInt8], message msg: [UInt8], signature sig: [UInt8]) -> Bool {

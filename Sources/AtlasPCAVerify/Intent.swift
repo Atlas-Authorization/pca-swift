@@ -13,15 +13,22 @@ public struct IntentPolicy: Equatable {
     public var minFidelityPpm: Double?
     /// Deny when the claimed `residual_risk_ppm` is above this. Setting it implies `require`.
     public var maxResidualRiskPpm: Double?
+    /// Goal binding v3: the digests of the Goal IR the principal signed and of the policy compiled from it. When set, the root
+    /// grant's goal commitment must open to exactly that pair (a v1/v2 grant does not) and the policy is active. Both digests must be
+    /// canonical base64url (32 bytes), else the `intent` check fails closed.
+    public var approvedGoal: ApprovedGoalRef?
+    /// `fromJSON` saw an `approved_goal` that is not a closed `{goal_digest, policy_digest}` string object: a misconfiguration.
+    var approvedGoalBad: Bool = false
 
-    public init(require: Bool = false, minFidelityPpm: Double? = nil, maxResidualRiskPpm: Double? = nil) {
+    public init(require: Bool = false, minFidelityPpm: Double? = nil, maxResidualRiskPpm: Double? = nil, approvedGoal: ApprovedGoalRef? = nil) {
         self.require = require
         self.minFidelityPpm = minFidelityPpm
         self.maxResidualRiskPpm = maxResidualRiskPpm
+        self.approvedGoal = approvedGoal
     }
 
     /// True iff the policy is active.
-    public var isActive: Bool { require || minFidelityPpm != nil || maxResidualRiskPpm != nil }
+    public var isActive: Bool { require || minFidelityPpm != nil || maxResidualRiskPpm != nil || approvedGoal != nil || approvedGoalBad }
 
     /// Lenient construction from a JSON object `{require?, min_fidelity_ppm?, max_residual_risk_ppm?}`: a threshold
     /// keeps its NUMERIC VALUE whatever its lexical form (`950000.0`, `1e6` are valid integers; `-0` is -0.0), so the
@@ -40,7 +47,16 @@ public struct IntentPolicy: Equatable {
         }
         var require = false
         if case .bool(true) = o["require"] { require = true }
-        return IntentPolicy(require: require, minFidelityPpm: num("min_fidelity_ppm"), maxResidualRiskPpm: num("max_residual_risk_ppm"))
+        var p = IntentPolicy(require: require, minFidelityPpm: num("min_fidelity_ppm"), maxResidualRiskPpm: num("max_residual_risk_ppm"))
+        if let x = o["approved_goal"] {
+            // closed object: exactly goal_digest and policy_digest, both strings; anything else is a misconfiguration
+            if case let .object(ag) = x, ag.count == 2, case let .string(g)? = ag["goal_digest"], case let .string(d)? = ag["policy_digest"] {
+                p.approvedGoal = ApprovedGoalRef(goalDigest: g, policyDigest: d)
+            } else {
+                p.approvedGoalBad = true
+            }
+        }
+        return p
     }
 
     /// Parse raw policy JSON text with the lenient loader (any JSON number form) and apply `fromJSON`. nil when the
@@ -51,8 +67,21 @@ public struct IntentPolicy: Equatable {
     }
 }
 
+/// The closed object `{goal_digest, policy_digest}` of goal binding v3 (both canonical base64url, 32 bytes).
+public struct ApprovedGoalRef: Equatable, Sendable {
+    public var goalDigest: String
+    public var policyDigest: String
+    public init(goalDigest: String, policyDigest: String) {
+        self.goalDigest = goalDigest
+        self.policyDigest = policyDigest
+    }
+    /// Both digests canonical base64url, exactly 32 bytes.
+    public var isValid: Bool { Base64URLStrict.isValid(goalDigest, length: 32) && Base64URLStrict.isValid(policyDigest, length: 32) }
+}
+
 enum Intent {
     static let GOAL_PREFIX = "pca-intent:v1:"
+    static let GOAL_V3_PREFIX = "pca-intent:v3:"
     static let GOAL_COMMIT_DOMAIN = "atlas-pca/goal/v1\u{0}"
     static let PPM_ONE: Int64 = 1_000_000
     static let MAX_GOAL_SALT_LEN = 128
@@ -72,6 +101,19 @@ enum Intent {
             "goal": .string(goal),
             "salt": .string(goalSalt),
         ])
+        guard let bytes = try? Canonical.canonicalBytes(v) else { return nil }
+        return Base64URLStrict.encode(Canonical.sha256(bytes))
+    }
+
+    /// The v3 goal string `pca-intent:v3:<goal_digest>:<policy_digest>`; nil for a malformed digest (never commit to garbage).
+    static func goalV3(_ ref: ApprovedGoalRef) -> String? {
+        ref.isValid ? GOAL_V3_PREFIX + ref.goalDigest + ":" + ref.policyDigest : nil
+    }
+
+    /// base64url(sha256(strictCanonical({d, goal: goalV3(ref), salt}))); nil for a malformed digest.
+    static func goalCommitV3(_ ref: ApprovedGoalRef, goalSalt: String) -> String? {
+        guard let goal = goalV3(ref) else { return nil }
+        let v: JSONValue = .object(["d": .string(GOAL_COMMIT_DOMAIN), "goal": .string(goal), "salt": .string(goalSalt)])
         guard let bytes = try? Canonical.canonicalBytes(v) else { return nil }
         return Base64URLStrict.encode(Canonical.sha256(bytes))
     }
@@ -121,15 +163,29 @@ enum Intent {
         if let pol = policy, !okThreshold(pol.minFidelityPpm) || !okThreshold(pol.maxResidualRiskPpm) {
             return (false, "intent policy misconfigured: thresholds must be non-negative safe integers (fail closed)")
         }
+        if active, let pol = policy, pol.approvedGoalBad || !(pol.approvedGoal?.isValid ?? true) {
+            return (false, "intent policy misconfigured: approved_goal digests must be canonical base64url (32 bytes) (fail closed)")
+        }
         guard let i = intent else { return (false, "this verifier requires an intent binding but the PCActn carries none") }
         guard let commit = rootGoalCommit(grant) else {
             return (false, "the root grant carries no envelope goal commitment to bind the intent to")
+        }
+        if let ag = policy?.approvedGoal {
+            guard let w = goalCommitV3(ag, goalSalt: i.get("goal_salt")?.asString ?? ""), w.unicodeScalars.elementsEqual(commit.unicodeScalars) else {
+                return (false, "the root grant's goal commitment does not open to the approved goal and compiled policy (v3)")
+            }
+            return floors(i, policy)
         }
         let want = goalCommit(ref: i.get("ref")?.asString ?? "", mapDigest: i.get("map_digest")?.asString ?? "",
                               goalSalt: i.get("goal_salt")?.asString ?? "", session: session, mapForm: mapForm)
         guard let w = want, w.unicodeScalars.elementsEqual(commit.unicodeScalars) else {
             return (false, "intent ref / map_digest / goal_salt do not open the root grant's goal commitment")
         }
+        return floors(i, policy)
+    }
+
+    /// The fidelity / residual-risk floors, after the goal commitment opened.
+    static func floors(_ i: JSONValue, _ policy: IntentPolicy?) -> (ok: Bool, why: String) {
         let fid = i.get("fidelity_ppm")?.safeInt ?? -1
         let res = i.get("residual_risk_ppm")?.safeInt ?? Int64.max
         if let lo = policy?.minFidelityPpm, Double(fid) < lo {
@@ -148,4 +204,11 @@ extension PCA {
     public static func intentGoalCommit(ref: String, mapDigest: String, goalSalt: String) -> String? {
         Intent.goalCommit(ref: ref, mapDigest: mapDigest, goalSalt: goalSalt)
     }
+
+    /// The v3 goal string `pca-intent:v3:<goal_digest>:<policy_digest>` (what a minting wallet commits to); nil when a digest is not
+    /// canonical base64url (32 bytes).
+    public static func intentGoalV3(_ ref: ApprovedGoalRef) -> String? { Intent.goalV3(ref) }
+
+    /// The v3 goal commitment for a salt (`intentGoalCommit`'s hash over the v3 goal); nil when a digest is malformed.
+    public static func intentGoalCommitV3(_ ref: ApprovedGoalRef, goalSalt: String) -> String? { Intent.goalCommitV3(ref, goalSalt: goalSalt) }
 }

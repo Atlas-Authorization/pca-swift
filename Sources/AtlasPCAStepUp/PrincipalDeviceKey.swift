@@ -22,7 +22,12 @@ public protocol SecretStore: Sendable {
 public struct PrincipalDeviceKey: Sendable {
     private let store: SecretStore
 
+    #if canImport(Security)
     public init(store: SecretStore = KeychainSecretStore()) { self.store = store }
+    #else
+    /// No Keychain off Apple platforms: the caller names the store.
+    public init(store: SecretStore) { self.store = store }
+    #endif
 
     /// True when a key is stored.
     public var exists: Bool { ((try? store.load()) ?? nil) != nil }
@@ -73,7 +78,7 @@ public struct PrincipalDeviceKey: Sendable {
     }
 }
 
-/// In-memory store, for tests and previews only.
+/// In-memory store, for tests and demos only.
 public final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Data?

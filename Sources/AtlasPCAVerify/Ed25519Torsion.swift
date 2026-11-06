@@ -111,15 +111,15 @@ enum Ed25519Torsion {
     private static let pMinus2 = Fe(0xFFFF_FFFF_FFFF_FFEB, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0x7FFF_FFFF_FFFF_FFFF)
     private static let pMinus5Div8 = Fe(0xFFFF_FFFF_FFFF_FFFD, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0x0FFF_FFFF_FFFF_FFFF)
     private static let pMinus1Div4 = Fe(0xFFFF_FFFF_FFFF_FFFB, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0x1FFF_FFFF_FFFF_FFFF)
-    private static func finv(_ x: Fe) -> Fe { fpow(x, pMinus2) }
+    static func finv(_ x: Fe) -> Fe { fpow(x, pMinus2) }
     private static let d: Fe = fmul(negSub(Fe(121665)), finv(Fe(121666)))
     private static let d2: Fe = fadd(d, d)
     private static let sqrtM1: Fe = fpow(Fe(2), pMinus1Div4)
 
-    private struct Pt { var x: Fe, y: Fe, z: Fe, t: Fe }
-    private static let identity = Pt(x: zero, y: one, z: one, t: zero)
+    struct Pt { var x: Fe, y: Fe, z: Fe, t: Fe }
+    static let identity = Pt(x: zero, y: one, z: one, t: zero)
 
-    private static func add(_ a: Pt, _ b: Pt) -> Pt {
+    static func add(_ a: Pt, _ b: Pt) -> Pt {
         let A = fmul(fsub(a.y, a.x), fsub(b.y, b.x))
         let B = fmul(fadd(a.y, a.x), fadd(b.y, b.x))
         let C = fmul(fmul(a.t, d2), b.t)
@@ -129,7 +129,7 @@ enum Ed25519Torsion {
     }
 
     /// Canonical decode: nil if y >= p, off-curve, or x == 0 with the sign bit set.
-    private static func decode(_ enc: [UInt8]) -> Pt? {
+    static func decode(_ enc: [UInt8]) -> Pt? {
         guard enc.count == 32 else { return nil }
         var limbs = [UInt64](repeating: 0, count: 4)
         for i in 0..<32 { limbs[i >> 3] |= UInt64(enc[i]) << UInt64((i & 7) * 8) }
