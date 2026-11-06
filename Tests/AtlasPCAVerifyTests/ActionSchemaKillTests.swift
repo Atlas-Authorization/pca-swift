@@ -17,7 +17,7 @@ final class ActionSchemaKillTests: XCTestCase {
         return d
     }
     private func pErr(_ over: JObject = [:], drop: [String] = [], units: JObject? = nil) -> String? {
-        ActionSchema.paramDeclError("action.params.x", .object(decl(over, drop: drop)), units)
+        ActionSchema.paramDeclError("action.params.x", .object(decl(over, drop: drop)), units, v2: false)
     }
     private func verbV(_ over: JObject = [:], params: JObject = [:]) -> JSONValue {
         var v: JObject = ["verb": s("v"), "kind": s("read"), "params": .object(params)]
@@ -48,7 +48,7 @@ final class ActionSchemaKillTests: XCTestCase {
         XCTAssertEqual(shape(["sig": sig(["zzz": .int(1)])]), "sig: unknown member 'zzz'")
         XCTAssertEqual(ActionSchema.verbDeclError(verbV(["zzz": .int(1)]), nil), "verb entry: unknown member 'zzz'")
         XCTAssertEqual(pErr(["zzz": .int(1)]), "action.params.x: unknown member 'zzz'")
-        XCTAssertEqual(shape(["v": .int(2)]), "unsupported schema version")
+        XCTAssertEqual(shape(["v": .int(3)]), "unsupported schema version")
         XCTAssertEqual(shape(["kind": s("other")]), "kind must be 'pca-action-schema'")
     }
 
@@ -434,5 +434,109 @@ final class ActionSchemaKillTests: XCTestCase {
         XCTAssertEqual(r.path, "action.params.x")
         let ok = ActionSchema.conform(.object(["verbs": .array([.object(["verb": s("v"), "params": .object([:])])])]), verb: "v", params: .object([:]))
         XCTAssertTrue(ok.ok)
+    }
+
+    // ---- v2 verb `confirmation` and the unsigned document ------------------------------------------------------------------
+
+    private static let D32 = Base64URLStrict.encode([UInt8](repeating: 2, count: 32))
+    private func conf(_ over: JObject = [:]) -> JObject {
+        var c: JObject = ["def_digest": s(Self.D32), "traits_digest": s(Self.D32), "facts_digest": s(Self.D32), "final_traits": .array([s("pca.bulk"), s("pca.scheduled")]),
+                          "dismissed": .array([.object(["trait": s("pca.pii_access"), "reason": s("not personal data")])]), "reviewer_kid": s("rev"), "ts": .int(0), "sig": s(Self.SIGVAL)]
+        for (k, v) in over { c[k] = v }
+        return c
+    }
+    private func v2Verb(_ c: JSONValue?) -> JSONValue {
+        var v: JObject = ["verb": s("v"), "kind": s("read"), "params": .object([:]), "effects": .array([s("read")]), "traits": .array([]), "def": s(Self.D32),
+                          "floors": .object(["risk": .int(0), "rev": s("reversible"), "blast_ppm": .int(0), "esc": .int(0), "caveats": .array([]), "context": .array([]), "prules": .array([])])]
+        if let c = c { v["confirmation"] = c }
+        return .object(v)
+    }
+    private func cErr(_ over: JObject = [:], drop: String? = nil) -> String? {
+        var c = conf(over)
+        if let d = drop { c[JKey(d)] = nil }
+        return ActionSchema.verbDeclError(v2Verb(.object(c)), nil, v2: true)
+    }
+
+    func testConfirmationShape() {
+        XCTAssertNil(ActionSchema.verbDeclError(v2Verb(nil), nil, v2: true))
+        XCTAssertNil(cErr())
+        XCTAssertNotNil(ActionSchema.verbDeclError(v2Verb(.null), nil, v2: true))
+        XCTAssertNotNil(ActionSchema.verbDeclError(v2Verb(.array([])), nil, v2: true))
+        XCTAssertNotNil(ActionSchema.verbDeclError(v2Verb(.object(conf())), nil, v2: false)) // v1 has no v2 members
+        XCTAssertNotNil(cErr(["zzz": .int(1)]))
+        XCTAssertNotNil(cErr(drop: "reviewer_kid"))
+        XCTAssertNotNil(cErr(["def_digest": s("AA")]))
+        XCTAssertNotNil(cErr(["sig": s(Base64URLStrict.encode([UInt8](repeating: 1, count: 63)))]))
+        XCTAssertNotNil(cErr(["final_traits": .array([s("pca.scheduled"), s("pca.bulk")])]))
+        XCTAssertNotNil(cErr(["final_traits": .array([s("pca.bulk"), s("pca.bulk")])]))
+        XCTAssertNotNil(cErr(["final_traits": .array([s("bulk")])]))
+        XCTAssertNotNil(cErr(["dismissed": .array([.object(["trait": s("pca.pii_access")])])]))
+        XCTAssertNotNil(cErr(["dismissed": .array([.object(["trait": s("pca.pii_access"), "reason": s("")])])]))
+        XCTAssertNotNil(cErr(["dismissed": .array([.object(["trait": s("pca.pii_access"), "reason": s(a(257))])])]))
+        XCTAssertNil(cErr(["dismissed": .array([.object(["trait": s("pca.pii_access"), "reason": s(a(256))])])]))
+        XCTAssertNotNil(cErr(["reviewer_kid": s(a(129))]))
+        XCTAssertNil(cErr(["reviewer_kid": s(a(128))]))
+        XCTAssertNotNil(cErr(["ts": .int(-1)]))
+        XCTAssertNotNil(cErr(["ts": .double(1.5)]))
+        XCTAssertNotNil(cErr(["ts": s("1")]))
+    }
+
+    func testUnsignedDocument() {
+        var d = doc().asObject!
+        d["sig"] = nil
+        XCTAssertNil(ActionSchema.shapeError(.object(d), signed: false))
+        XCTAssertNotNil(ActionSchema.shapeError(.object(d)))
+        d["sig"] = sig()
+        XCTAssertEqual(ActionSchema.shapeError(.object(d), signed: false), "an unsigned schema must not carry sig")
+    }
+
+    // 0.5: a confirmation ts of -0 is malformed (strict profile, as the TS reference)
+    func testConfirmationTsNegativeZeroIsMalformed() {
+        var c: JObject = ["def_digest": s(String(repeating: "Q", count: 43)), "traits_digest": s(String(repeating: "A", count: 43)), "facts_digest": s(String(repeating: "A", count: 43)),
+                          "final_traits": .array([s("pca.irreversible"), s("pca.money_moving")]), "dismissed": .array([.object(["trait": s("pca.bulk"), "reason": s("one item")])]),
+                          "reviewer_kid": s("rev-1"), "ts": .int(0), "sig": s(String(repeating: "Q", count: 86))]
+        XCTAssertNil(ActionSchema.confirmationShapeError(.object(c)))
+        c["ts"] = .double(-0.0)
+        XCTAssertEqual(ActionSchema.confirmationShapeError(.object(c)), "confirmation: ts must be a non-negative safe integer")
+    }
+
+    // ---- paramDeclError, v2 members ---------------------------------------------------------------------------------------
+
+    private func p2(_ over: JObject = [:]) -> String? {
+        ActionSchema.paramDeclError("action.params.x", .object(decl(over)), nil, v2: true)
+    }
+
+    func testParamV2MinMaxOnDurationOnly() {
+        let m = "must be a safe integer on an integer parameter"
+        XCTAssertNil(p2(["type": s("duration"), "min": .int(1), "max": .int(5)]))
+        XCTAssertNil(p2(["type": s("integer"), "min": .int(1)]))
+        XCTAssertEqual(p2(["type": s("string"), "min": .int(1)]), "action.params.x: min \(m)")
+        XCTAssertEqual(p2(["type": s("datetime"), "max": .int(1)]), "action.params.x: max \(m)")
+        XCTAssertEqual(pErr(["type": s("string"), "min": .int(1)]), "action.params.x: min \(m)")
+    }
+
+    func testParamV2RoleAndFormat() {
+        let role = "action.params.x: role must be a non-empty string"
+        XCTAssertNil(p2(["role": s(a(128))]))
+        XCTAssertEqual(p2(["role": s(a(129))]), role)
+        XCTAssertEqual(p2(["role": s("")]), role)
+        XCTAssertEqual(p2(["role": .int(1)]), role)
+        let fmt = "action.params.x: format must be a known format on a string parameter"
+        XCTAssertNil(p2(["format": s("email")]))
+        XCTAssertNil(p2(["type": s("object_ref"), "format": s("uuid")]))
+        XCTAssertEqual(p2(["format": s("bogus-format")]), fmt)
+        XCTAssertEqual(p2(["format": .int(1)]), fmt)
+        XCTAssertEqual(p2(["type": s("integer"), "format": s("email")]), fmt)
+        // v1 has no role / format members at all
+        XCTAssertEqual(pErr(["role": s("r")]), "action.params.x: unknown member 'role'")
+    }
+
+    func testParamReservedNamesAtEveryDepth() {
+        XCTAssertNil(p2())
+        for n in ["__proto__", "constructor", "prototype"] {
+            let e = ActionSchema.paramDeclError("action.params.\(n)", .object(decl()), nil, v2: true)
+            XCTAssertEqual(e, "parameter name 'action.params.\(n)' is reserved (__proto__ / constructor / prototype)")
+            XCTAssertNotNil(ActionSchema.paramDeclError("action.params.a.\(n)", .object(decl()), nil, v2: true))
+        }
     }
 }

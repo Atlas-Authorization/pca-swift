@@ -59,7 +59,8 @@ enum IntentV2 {
         case .null: return "null"
         case let .bool(b): return b ? "true" : "false"
         case let .int(i): return String(i)
-        case let .double(d): return d == 0 ? "0" : Canonical.numberString(d)
+        // JS Number#toString switches to exponent form at 1e21 ("1e+21"); Swift's shortest description spells that form the same way
+        case let .double(d): return d == 0 ? "0" : abs(d) >= 1e21 && d.isFinite ? "\(d)" : Canonical.numberString(d)
         case let .string(s): return s
         case let .array(a): return a.map { if case .null = $0 { return "" } else { return jsString($0) } }.joined(separator: ",")
         case .object: return "[object Object]"
@@ -82,7 +83,8 @@ enum IntentV2 {
         if !optObj(pol) { return "policy must be an object" }
         if case let .object(po)? = pol {
             // closed member sets; every flag a JSON boolean and every number a non-negative safe integer when present
-            for k in po.keys where !["session", "schema", "acc", "map"].contains(k.s) { return "policy: unknown member '\(k.s)'" }
+            for k in po.keys where !["session", "schema", "acc", "map", "model_polarity"].contains(k.s) { return "policy: unknown member '\(k.s)'" }
+            if let mp = po["model_polarity"], mp.asString != "strict" && mp.asString != "legacy" { return "policy.model_polarity must be 'strict' or 'legacy'" }
             if let pa = po["acc"] {
                 guard case let .object(o) = pa else { return "policy.acc must be an object" }
                 for k in o.keys where k.s != "max_receipt_age_s" && k.s != "max_keyset_age_s" { return "policy.acc: unknown member '\(k.s)'" }
@@ -106,7 +108,17 @@ enum IntentV2 {
                 if let c = o["closed_world"], !isBool(c) { return "policy.schema.closed_world must be a boolean" }
             }
         }
+        if let r = o["reviewers"] {
+            guard r.isObject, case .array? = r.get("keys") else { return "reviewers must be {keys: [...]}" }
+        }
+        if let cc = o["call_context"] {
+            guard case let .array(a) = cc, a.allSatisfy({ $0.asString != nil }) else { return "call_context must be an array of strings" }
+        }
+        let ac = o["actions"]
+        if !optObj(ac) { return "actions must be an object" }
+        for k in ["records", "keys", "reapprovals"] where !optArr(ac?.get(k)) { return "actions.\(k) must be an array" }
         if !optObj(o["params"]) { return "params must be an object" }
+        if !optObj(o["env"]) { return "env must be an object" }
         for k in ["schema", "session", "acc"] where !optObj(o[JKey(k)]) { return "\(k) must be an object" }
         if let L = o["layers"] {
             guard case let .object(lo) = L else { return "layers must be an object" }
@@ -178,6 +190,8 @@ enum IntentV2 {
         let v = ActionSchema.verify(doc, keys: ctx?.get("schema")?.get("keys"))
         if !v.ok { return ("schema does not verify: \(v.reason)", nil) }
         if !IV.same(doc.get("aud")?.asString, p["aud"]?.asString) { return ("schema aud does not match the PCActn aud", nil) }
+        // rule 22, integrity half: the document's materialized floors and traits are recomputed, never trusted
+        if case let .object(d) = doc, IV.num(d["v"]) == 2, let fe = Actions.schemaFloorError(d, ctx?.get("reviewers")) { return ("schema_floor_forged: \(fe)", nil) }
         guard let params = ctx?.get("params"), params.isObject else { return ("no plaintext params to check against the schema (closed world needs them)", nil) }
         guard let pd = IV.strictHash(params), IV.same(pd, p["action"]?.get("params_digest")?.asString) else {
             return ("params do not hash to action.params_digest", nil)
@@ -240,14 +254,14 @@ enum IntentV2 {
         let n = Int(seq)
         for i in 0..<n {
             let g = prior[i]
-            guard g.isObject, g.get("id")?.asString != nil, g.get("issuer")?.asString != nil else { return "session grant \(i) is not a capability" }
+            guard g.isObject, g.get("id")?.asString != nil, let issuer = g.get("issuer")?.asString else { return "session grant \(i) is not a capability" }
             if let se = IV.suiteError(g.get("alg")) { return "session grant \(i): \(se)" }
             let c = IntentSession.grantCaveat(g)
             if IntentSession.caveatError(c) != nil || !IV.same(c!.get("session")?.asString, session) || !IV.same(c!.get("root")?.asString, rootD)
                 || IV.num(c!.get("seq")) != Double(i) {
                 return "session grant \(i) does not belong to this session at seq \(i)"
             }
-            if !(g.get("issuer")?.asString.map { IV.contains(principals, $0) } ?? false) { return "session grant \(i) is not signed by a session principal" }
+            if !IV.contains(principals, issuer) { return "session grant \(i) is not signed by a session principal" }
             if i > 0 && !IV.strictEq(c!.get("prev"), prior[i - 1].get("id")) { return "session grant \(i) does not chain to grant \(i - 1)" }
         }
         if seq > 0 && !IV.strictEq(gc!.get("prev"), prior[n - 1].get("id")) { return "the admitting root does not chain to grant \(n - 1)" }
@@ -268,7 +282,9 @@ enum IntentV2 {
             guard let aid = grant.get("id")?.asString else { return "revocation: the admitting root has no id" }
             ids.append(IntentRevocation.deltaId(aid))
             if case let .object(std)? = S["layers"]?.get("std") {
-                ids.append(IntentRevocation.profileId(std["profile"]?.asString ?? "", IV.int(std["version"]) ?? 0))
+                // the verified root's shape requires a version >= 1
+                guard let version = IV.int(std["version"]) else { return "revocation: layers.std has no version" }
+                ids.append(IntentRevocation.profileId(std["profile"]?.asString ?? "", version))
             }
             // only the dedicated authority S.revocation.key signs epochs; a PQ epoch verifies only under S.revocation.pq_pk
             var pins: [String: String] = [:]
@@ -412,21 +428,23 @@ enum IntentV2 {
     }
 
     /// `decideIntentV2`: the v2 checks in order, each reported only under its condition; never traps.
-    static func decide(_ p: JObject, grant: JSONValue, ctx ctxIn: IntentV2Context?, now nowI: Int64) -> (checks: [Check], env: IntentV2Env?) {
+    static func decide(_ p: JObject, grant: JSONValue, ctx ctxIn: IntentV2Context?, now nowI: Int64) -> (checks: [Check], env: IntentV2Env?, legacy: Bool) {
         let ctx = ctxIn?.value
         let now = Double(nowI)
         var checks: [Check] = []
         var env: IntentV2Env?
+        var schemaDoc: JSONValue?
+        var singleSource: [String] = []
         func run(_ name: String, _ s: Step) { checks.append(Check(name: name, ok: s == nil, reason: s ?? "")) }
         let present = p["intent_session"] != nil
         if let ce = contextError(ctx) {
             // a malformed verifier context fails closed: every v2 check that could be reported fails with the reason
             let committed = present && IV.same(p["intent_session"]?.get("map_form")?.asString, IntentMap.FORM_COMMIT)
             for name in ["schema", "intent_session"] + (present ? ["accumulators"] : []) + (committed ? ["map"] : []) { run(name, "malformed v2 context: \(ce)") }
-            return (checks, nil)
+            return (checks, nil, false)
         }
         // the verifier clock: a safe integer, else every v2 check run here fails closed
-        let clockOk = IV.isSafeDouble(now) && nowI >= -Canonical.MAX_SAFE && nowI <= Canonical.MAX_SAFE
+        let clockOk = IV.isSafeDouble(now) // an Int64 outside +-(2^53-1) converts to a magnitude >= 2^53, so this alone decides
         func step(_ s: @autoclosure () -> Step) -> Step { clockOk ? s() : "the verifier clock is not a safe integer (fail closed)" }
         let pol = ctx?.get("policy")
         if present || pol?.get("schema")?.get("closed_world") == .bool(true) {
@@ -434,6 +452,7 @@ enum IntentV2 {
             if s == nil, let d = doc, case let .object(params)? = ctx?.get("params") {
                 env = IntentV2Env(canon: ActionSchema.canonProjection(d, verb: actionString(p, "verb"), params: params))
             }
+            if s == nil { schemaDoc = doc }
             run("schema", s)
         }
         if present || pol?.get("session")?.get("require") == .bool(true) {
@@ -479,6 +498,7 @@ enum IntentV2 {
                 if status == "pass" { run(name, nil) }
                 else { run(name, status == "question" ? "intent_required: \(wb.reason ?? "a question is required")" : (wb.reason ?? "rejected")) }
             }
+            singleSource = wb.singleSource
             if wb.outcome != "deny" {
                 var e = env ?? IntentV2Env()
                 if let w = wb.world { e.world = w }
@@ -489,7 +509,91 @@ enum IntentV2 {
         } else if mapActive {
             run("map", step(mapStep(p, ctx)))
         }
-        return (checks, env)
+        // rules 20 and 21, last (the verifier-computed env is complete)
+        var legacy = false
+        for c in modelRules(p, grant: grant, ctx: ctx, env: env, schemaDoc: schemaDoc, singleSource: singleSource, action: action) {
+            if !clockOk {
+                run(c.check.name, "the verifier clock is not a safe integer (fail closed)")
+                continue
+            }
+            if let l = c.legacy, l { legacy = true }
+            checks.append(c.check)
+        }
+        return (checks, env, legacy)
+    }
+
+    /// The predicate lists a model-derived path could widen: the grant's allow-list and the ceilings (V5 layers).
+    static func allowSidePredicates(_ env: JSONValue?, _ ctx: JSONValue?) -> [JSONValue] {
+        var lists: [JSONValue] = [env?.get("predicates") ?? .null]
+        for k in ["org", "site", "std"] { lists.append(ctx?.get("layers")?.get(k)?.get("predicates") ?? .null) }
+        return lists
+    }
+
+    /// Rule 22, in the reference's order: `pin` (reported iff `envelope.actions` is present) and `traits` (the schema is v2, or a pin
+    /// is present and the document is v2). Then rules 20 (`units`: reported iff `envelope.units` is present) and 21 (`tighten`: reported iff `envelope.tighten` or a
+    /// `model_polarity` is present, or a grant-side `where` reads a model-derived env path). Both read the signed ENVELOPE of
+    /// the stored grant; a PCActn with none of these verifies exactly as without the two rules.
+    static func modelRules(_ p: JObject, grant: JSONValue, ctx: JSONValue?, env: IntentV2Env?, schemaDoc: JSONValue?, singleSource: [String],
+                           action: JSONValue) -> [(check: Check, legacy: Bool?)] {
+        var out: [(check: Check, legacy: Bool?)] = []
+        let envelope = PCA.readEnvelope(grant)
+        let preds = allowSidePredicates(envelope, ctx)
+        let verb = actionString(p, "verb")
+        // one schema step for every rule below that needs the document
+        var schemaMemo: (Step, JSONValue?)?
+        func schemaFor() -> (Step, JSONValue?) {
+            if let m = schemaMemo { return m }
+            let r: (Step, JSONValue?) = schemaDoc != nil ? (nil, schemaDoc) : schemaStep(p, ctx)
+            schemaMemo = r
+            return r
+        }
+        let pinV = envelope?.get("actions")
+        if pinV != nil {
+            let (step, doc) = schemaFor()
+            var s = step
+            if s == nil {
+                let ac = ctx?.get("actions")
+                let d = Actions.decidePin(pin: pinV, doc: doc, verb: verb, records: ac?.get("records")?.asArray ?? [], keys: ac?.get("keys") ?? .array([]),
+                                          reapprovals: ac?.get("reapprovals")?.asArray ?? [], grantId: grant.get("id")?.asString ?? "", issuer: grant.get("issuer")?.asString ?? "")
+                if !d.ok { s = "\(d.escalate ? "escalate: " : "")\(d.code ?? ""): \(d.reason)\(d.needsReapproval.map { " (re-approve diff \($0))" } ?? "")" }
+            }
+            out.append((Check(name: "pin", ok: s == nil, reason: s ?? ""), nil))
+        }
+        if let doc = pinV != nil ? schemaFor().1 : schemaDoc, IV.num(doc.get("v")) == 2 {
+            let pin = Actions.actionPinError(pinV) == nil ? pinV : nil
+            let caveats = (envelope?.get("caveats")?.asArray ?? []).compactMap { $0.get("type")?.asString } + (pin?.get("caveats")?.asArray ?? []).compactMap { $0.asString }
+            let d = Actions.rule22Decide(doc: doc, verb: verb, grantCaveats: caveats, maxEsc: IV.int(pin?.get("max_esc")).map { Int($0) } ?? 3, // MAX_ESC_TIER
+                                         preauthEsc: IV.int(pin?.get("preauth_esc")).map { Int($0) } ?? 0, context: (ctx?.get("call_context")?.asArray ?? []).compactMap { $0.asString })
+            let s: Step = d == "allow" ? nil : d == "escalate" ? "escalate: the action floors need a caveat, context or confirmation the grant does not provide (rule 22)"
+                : "the action floors exceed what the grant authorizes (rule 22)"
+            out.append((Check(name: "traits", ok: s == nil, reason: s ?? ""), nil))
+        }
+        if let units = envelope?.get("units") {
+            let (step, doc) = schemaFor()
+            var s = step
+            if s == nil, let d = doc {
+                var input: JObject = ["units": units, "verb": .string(verb), "predicates": .array(preds)]
+                if let su = d.get("units") { input["schema_units"] = su }
+                if let vp = ActionSchema.verb(d, verb)?["params"] { input["verb_params"] = vp }
+                let r = PCA.decideUnits(.object(input))
+                s = r.ok ? nil : r.reason
+            }
+            out.append((Check(name: "units", ok: s == nil, reason: s ?? ""), nil))
+        }
+        let polPolicy = ctx?.get("policy")?.get("model_polarity")
+        var polarity: JSONValue? = envelope?.get("model_polarity")
+        if let pp = polPolicy { polarity = pp.asString == "strict" ? nil : pp }
+        if envelope?.get("tighten") != nil || polarity != nil || polPolicy != nil || !PCA.modelPathsRead(preds, single: singleSource).isEmpty {
+            var cenv: JObject = ctx?.get("env")?.asObject ?? [:]
+            for (k, v) in env?.json.asObject ?? [:] { cenv[k] = v }
+            var input: JObject = ["predicates": .array(preds), "single_source": .array(singleSource.map { .string($0) }),
+                                  "context": .object(["action": action, "env": .object(cenv)])]
+            if let t = envelope?.get("tighten") { input["tighten"] = t }
+            if let pl = polarity { input["polarity"] = pl }
+            let r = PCA.decideTighten(.object(input))
+            out.append((Check(name: "tighten", ok: r.outcome == "ok", reason: r.outcome == "ok" ? "" : (r.reason ?? "refused")), r.legacy))
+        }
+        return out
     }
 }
 

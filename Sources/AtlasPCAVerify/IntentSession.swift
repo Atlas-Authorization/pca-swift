@@ -189,6 +189,11 @@ enum IntentSession {
     /// declares a `pq_pk`, must agree. An ed25519 root never consults the pins.
     static func verifyRoot(_ sv: JSONValue, pqPins: JSONValue? = nil) -> (ok: Bool, reason: String) {
         if let e = shapeError(sv) { return (false, e) }
+        return verifyShapedRoot(sv, pqPins: pqPins)
+    }
+
+    /// `verifyRoot` past `shapeError`. Its "malformed" refusals are fail-closed backstops `shapeError` already rules out, testable only through this seam.
+    static func verifyShapedRoot(_ sv: JSONValue, pqPins: JSONValue?) -> (ok: Bool, reason: String) {
         guard case let .object(s) = sv, let signer = s["signer"]?.asString else { return (false, "malformed session root") }
         let principal = s["principals"]?.asArray?.first { IV.same($0.get("key")?.asString, signer) }
         var pin: String? = nil
@@ -206,10 +211,9 @@ enum IntentSession {
         guard let bound = IV.bindSuite(b, alg: s["alg"], pqPk: s["pq_pk"]), let msg = IV.message(SIG_DOMAIN, .object(bound)) else {
             return (false, "malformed session root")
         }
-        switch IV.verifyPinned(alg: s["alg"], identity: signer, artifactPqPk: s["pq_pk"], msg: msg, sig: s["sig"], pqSig: s["pq_sig"], pin: pin) {
-        case .valid: break
-        case .unsupported: return (false, IV.UNSUPPORTED_SUITE)
-        case .invalid: return (false, "session root signature invalid")
+        // the suiteError check above already refused every alg verifyPinned would call unsupported
+        if IV.verifyPinned(alg: s["alg"], identity: signer, artifactPqPk: s["pq_pk"], msg: msg, sig: s["sig"], pqSig: s["pq_sig"], pin: pin) != .valid {
+            return (false, "session root signature invalid")
         }
         return (true, "")
     }

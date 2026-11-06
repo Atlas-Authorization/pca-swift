@@ -1,0 +1,3 @@
+[
+ {"file": "Sources/AtlasPCAStepUp/StepUpError.swift", "reason": "Error enum and a switch with one fixed message per case: no condition, arithmetic or call to mutate"}
+]
