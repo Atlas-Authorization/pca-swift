@@ -1,0 +1,1541 @@
+import Foundation
+
+// `PCA.authorize`: the full authorization pipeline for a Swift resource server or tool guard (0.5, additive).
+//
+// `PCA.verify` answers "is this a validly signed PCActn for this audience". `authorize` answers "may THIS operation run
+// now", in the same order as the TypeScript `authorize()`:
+//
+//   1. configuration: `audience`, `resolveGrant`, `stateStore` and `isRevoked` are REQUIRED, and the call names the
+//      `operation` it will execute (verb, resource, params). A missing one denies with its name.
+//   2. the core checks (`PCA.verify`, which fails `zk_compliance` on a carried proof), then `revocation` (`isRevoked`).
+//   3. `operation`: the signed `action.verb` / `action.resource` equal the operation's, and the signed
+//      `action.params_digest` opens to exactly the operation's params. Those params are what the predicates and caveats
+//      read.
+//   4. `grant_ref`, `params_digest`, `plan_root_authorized`, `attestation` (a grant whose `agent_binding` pins the agent
+//      needs an attestation verifier this SDK does not have: fail closed), `reversibility`.
+//   5. policy: the envelope predicates (default deny), the envelope caveats and the root caveats outside the envelope
+//      (`policy`), and the caveats delegation hops appended (`delegated_caveats`). Unknown caveat types fail closed.
+//   6. replay: only when everything above passes, the counter is consumed through `stateStore.claim(key:counter:)`.
+//
+//   5b. risk: the risk score (server inputs, priced at the worst case when absent), the trust budget (moved atomically with the counter in a
+//      `PCABudgetStore`) and the threshold step-up (`threshold`, needs a `thresholdHook` for t above 1).
+//
+// F3 gates (see AuthorizeGates.swift): requirePassport, forbid, requireLinkedTemplate, contracts, enforceFreshness, enforceTaint and beacon. Never throws or traps on its inputs: an internal error is a denial.
+
+/// The replay store: ONE atomic operation per action.
+///
+/// `claim(key:counter:)` must, atomically: if a counter is stored for `key` and `counter` is not strictly greater, return
+/// `ClaimResult(ok: false, lastCounter: stored)`; otherwise store `counter` and return `ClaimResult(ok: true)`. A claim
+/// that cannot decide must return `ok: false` or throw (`authorize` then denies).
+public protocol PCAStateStore {
+    func claim(key: String, counter: Int64) throws -> ClaimResult
+    /// TTL'd consume-once (K1 `max_uses` slots): true iff `key` has no live record (one whose `retainUntil >= now`); the store
+    /// then remembers it at least until `retainUntil` (the maximum of the horizons it has seen). Throws for an empty key or
+    /// `retainUntil < now` (never true) and leaves nothing behind. The default falls back to `claim(key:counter: 1)`, which
+    /// never forgets (correct, but the slot does not expire); a durable store should override it with an atomic
+    /// insert-or-update-if-expired and prune expired rows.
+    func consumeOnce(key: String, retainUntil: Int64, now: Int64) throws -> Bool
+    /// Where this store's state lives (default `.shared`; `MemoryStateStore` is `.process`).
+    var scope: PCAStoreScope { get }
+}
+
+/// Where a store's state lives: `process` (this process only) or `shared` (every instance of the service sees it).
+public enum PCAStoreScope: Sendable { case process, shared }
+
+extension PCAStateStore {
+    /// A store that does not say is taken as shared (a host's database store); `MemoryStateStore` declares `.process`.
+    public var scope: PCAStoreScope { .shared }
+}
+
+/// A store that can hold the revocation-epoch rollback pin of a grant (`<grant id>:epoch`): monotone, never lowered. Required by
+/// `revocationStaleness`: without a pin an old (still validly signed) epoch could be replayed after a newer one was accepted.
+public protocol PCAPinStore: PCAStateStore {
+    func pin(key: String) throws -> Double?
+    /// Atomically sets the pin to max(current, value).
+    func raisePin(key: String, value: Double) throws
+}
+
+/// Thrown by `consumeOnce` for an empty key or a retention horizon before `now`.
+public struct PCAStoreArgumentError: Error, Equatable, Sendable {}
+
+extension PCAStateStore {
+    public func consumeOnce(key: String, retainUntil: Int64, now: Int64) throws -> Bool {
+        if key.isEmpty || retainUntil < now { throw PCAStoreArgumentError() }
+        return try claim(key: key, counter: 1).ok
+    }
+}
+
+/// What `PCAStateStore.claim` returns. `ok` is true only when THIS call consumed the counter.
+public struct ClaimResult: Equatable, Sendable {
+    public let ok: Bool
+    public let lastCounter: Int64?
+    /// True when the claim was refused because the stored trust budget moved since it was read (nothing consumed; retry).
+    public let conflict: Bool
+    public init(ok: Bool, lastCounter: Int64? = nil, conflict: Bool = false) {
+        self.ok = ok
+        self.lastCounter = lastCounter
+        self.conflict = conflict
+    }
+}
+
+/// A store that keeps the trust budget `{B, tau, asOf}` of each counter stream (same key as the counter) and moves it in the SAME atomic step
+/// as the counter claim, so two concurrent requests cannot both spend the same budget. Without one the budget is the context's, or B = 0.
+public protocol PCABudgetStore: PCAStateStore {
+    func budget(key: String) throws -> Risk.Budget?
+    /// `claim(key:counter:)` that also stores `budgetAfter` (nil keeps the stored one): when the stored budget differs from `budgetBefore` (both
+    /// absent counts as equal) nothing is consumed and `ClaimResult(ok: false, conflict: true)` is returned.
+    func claim(key: String, counter: Int64, budgetBefore: Risk.Budget?, budgetAfter: Risk.Budget?) throws -> ClaimResult
+}
+
+extension PCA {
+    /// What a threshold hook reports: whether it actually enforced a threshold proof, whether it accepted it, and the t it enforced.
+    public struct ThresholdOutcome: Equatable, Sendable {
+        public var enforced: Bool
+        public var ok: Bool
+        public var t: Double?
+        /// Why the hook rejected (the refusal reads `threshold: <reason>`; absent it reads `threshold: rejected`).
+        public var reason: String?
+        public init(enforced: Bool, ok: Bool, t: Double? = nil, reason: String? = nil) {
+            self.enforced = enforced
+            self.ok = ok
+            self.t = t
+            self.reason = reason
+        }
+    }
+}
+
+/// A replay store that can also report a holder's highest admitted counter (the head of its history). Required to admit an
+/// escalation answer: the answer is bound to that head (`PCA.escalationHistoryHead`).
+public protocol PCALastStore: PCAStateStore {
+    func last(key: String) throws -> Int64?
+}
+
+/// In-process replay store (one lock). Correct for ONE process only; several processes or hosts need a shared store with
+/// an atomic conditional write (see the README).
+public final class MemoryStateStore: PCALastStore, PCAPinStore, PCABudgetStore, @unchecked Sendable {
+    private var budgets: [String: Risk.Budget] = [:]
+    private var heads: [String: Int64] = [:]
+    private var pins: [String: Double] = [:]
+    private var once: [String: Int64] = [:] // key -> retain_until
+    let lock = PCALock()
+
+    public init() {}
+
+    /// Process-local: a second instance would not see this process's claims, pins or consumed slots.
+    public var scope: PCAStoreScope { .process }
+
+    public func pin(key: String) -> Double? {
+        lock.lock()
+        defer { lock.unlock() }
+        return pins[key]
+    }
+
+    public func budget(key: String) -> Risk.Budget? {
+        lock.lock()
+        defer { lock.unlock() }
+        return budgets[key]
+    }
+
+    /// Seeds the trust budget of a stream (the resource server's own budget store, before any action).
+    public func putBudget(key: String, _ b: Risk.Budget) {
+        lock.lock()
+        defer { lock.unlock() }
+        budgets[key] = b
+    }
+
+    public func claim(key: String, counter: Int64, budgetBefore: Risk.Budget?, budgetAfter: Risk.Budget?) -> ClaimResult {
+        lock.lock()
+        defer { lock.unlock() }
+        if let l = heads[key], !(counter > l) { return ClaimResult(ok: false, lastCounter: l) }
+        if budgets[key] != budgetBefore { return ClaimResult(ok: false, conflict: true) }
+        heads[key] = counter
+        if let a = budgetAfter { budgets[key] = a }
+        return ClaimResult(ok: true)
+    }
+
+    public func raisePin(key: String, value: Double) {
+        lock.lock()
+        defer { lock.unlock() }
+        pins[key] = max(pins[key] ?? value, value)
+    }
+
+    public func last(key: String) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return heads[key]
+    }
+
+    public func claim(key: String, counter: Int64) -> ClaimResult {
+        lock.lock()
+        defer { lock.unlock() }
+        if let l = heads[key], !(counter > l) { return ClaimResult(ok: false, lastCounter: l) }
+        heads[key] = counter
+        return ClaimResult(ok: true)
+    }
+
+    public func consumeOnce(key: String, retainUntil: Int64, now: Int64) throws -> Bool {
+        if key.isEmpty || retainUntil < now { throw PCAStoreArgumentError() }
+        lock.lock()
+        defer { lock.unlock() }
+        once = once.filter { $0.value >= now } // prune the expired
+        if let u = once[key] {
+            once[key] = max(u, retainUntil)
+            return false
+        }
+        once[key] = retainUntil
+        return true
+    }
+}
+
+extension PCA {
+    /// The `plan` mode that accepts a one-node plan whose node is exactly the operation.
+    public static let SINGLE_STEP = "single-step"
+
+    /// The checks that must be `pass` (not merely "not failed"). `require` can add names, never remove these.
+    public static let DEFAULT_REQUIRED_CHECKS = ["counter_format", "replay", "revocation", "plan_root_authorized", "audience", "validity", "grant_ref_bound",
+                                                 "operation", "params_digest", "policy"]
+
+    /// A failing one of these is an authentication failure (401); anything else is insufficient authority (403).
+    static let AUTHN_CHECKS = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "leaf_signature", "malformed", "grant_ref", "pq_pin"]
+
+    /// The order the core verifier evaluates its checks in (the decisive reason follows it).
+    static let CORE_CHECK_ORDER = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature",
+                                   "counter_format", "intent", "schema", "intent_session", "layers", "accumulators", "map", "facts", "provenance", "classes", "pin", "traits", "units", "tighten"]
+
+    /// The operation the handler or tool WILL execute, from the server's own routing and parsed input, never from the
+    /// PCActn. `params` must be a JSON object.
+    public struct Operation: Equatable, Sendable {
+        public var verb: String
+        public var resource: String
+        public var params: JSONValue
+        public init(verb: String, resource: String, params: JSONValue) {
+            self.verb = verb
+            self.resource = resource
+            self.params = params
+        }
+        var isValid: Bool { !verb.isEmpty && !resource.isEmpty && params.isObject }
+    }
+
+    /// The operation an allowing decision is bound to. `id` is the digest of the presented PCActn.
+    public struct AuthorizedOperation: Equatable, Sendable {
+        public let verb: String
+        public let resource: String
+        public let paramsDigest: String
+        public let id: String
+        public init(verb: String, resource: String, paramsDigest: String, id: String) {
+            self.verb = verb
+            self.resource = resource
+            self.paramsDigest = paramsDigest
+            self.id = id
+        }
+    }
+
+    /// `pass`, `fail` or `not-enforced`.
+    public enum CheckStatus: String, Sendable {
+        case pass
+        case fail
+        case notEnforced = "not-enforced"
+        /// The PCActn carries a feature this verifier does not implement (`bond_ref`): never a pass.
+        case unsupported
+    }
+
+    /// A tool call as a `tool_schema` caveat judges it: the tool name, its arguments (a JSON object) and, optionally, the
+    /// tool signature digest the PCActn signed (`tool_binding`).
+    public struct ToolCall: Sendable {
+        public var tool: String
+        public var args: JSONValue
+        public var toolSignatureDigest: String?
+        public init(tool: String, args: JSONValue, toolSignatureDigest: String? = nil) {
+            self.tool = tool
+            self.args = args
+            self.toolSignatureDigest = toolSignatureDigest
+        }
+    }
+
+    /// What the resource server knows about the request beyond the operation (all optional).
+    public struct AuthorizeContext {
+        /// The principal-authorized plan (plan nodes `{id, verb, resource, params_digest?, reversibility_class?, pre?, post?}`).
+        public var plan: [JSONValue]?
+        /// Must be true for `plan` to authorize the PCActn's plan root.
+        public var planAuthorized: Bool
+        /// The predicate context's `subject` and `env`.
+        public var subject: JSONValue?
+        public var env: JSONValue?
+        /// Read by `max_blast_radius` and `rate` caveats.
+        public var blastRadius: Double?
+        public var recentActionTimes: [Double]?
+        /// The server's authoritative reversibility class: the agent may declare a stricter one, never a weaker one.
+        public var reversibilityClass: String?
+        /// Server-held risk inputs `{semanticDistance, reversibility, blastRadius, taint, confidence, age}` (any subset, each in [0, 1]). An input
+        /// nobody supplies is priced at its worst case. The agent's own `provenance.taint_level` never counts.
+        public var risk: JObject?
+        /// The trust budget `{B, tau, asOf}` for this stream, when the host keeps it itself (else the store's, else seeded with `bMax`).
+        public var budget: Risk.Budget?
+        public init(plan: [JSONValue]? = nil, planAuthorized: Bool = false, subject: JSONValue? = nil, env: JSONValue? = nil,
+                    blastRadius: Double? = nil, recentActionTimes: [Double]? = nil, reversibilityClass: String? = nil,
+                    risk: JObject? = nil, budget: Risk.Budget? = nil) {
+            self.risk = risk
+            self.budget = budget
+            self.plan = plan
+            self.planAuthorized = planAuthorized
+            self.subject = subject
+            self.env = env
+            self.blastRadius = blastRadius
+            self.recentActionTimes = recentActionTimes
+            self.reversibilityClass = reversibilityClass
+        }
+    }
+
+    /// The Intent Layer v2 verifier context: a fixed value, or computed per PCActn.
+    public enum IntentV2Source {
+        case context(IntentV2Context)
+        case provider((JSONValue) throws -> IntentV2Context?)
+    }
+
+    /// K5 workflow admission (C-308), the verifier-pinned half: `principal` signs the workflow commitment, `rsSigner` signs the step
+    /// receipts (a key named inside either is never trusted). With `required`, a call that carries no `workflowStep` is refused.
+    public struct WorkflowGate: Sendable {
+        public var principal: String
+        public var rsSigner: String
+        public var required: Bool
+        public init(principal: String, rsSigner: String, required: Bool = false) {
+            self.principal = principal
+            self.rsSigner = rsSigner
+            self.required = required
+        }
+    }
+
+    /// The workflow step a call is: the signed commitment, the receipts so far (a JSON array), the step id.
+    public struct WorkflowCall: Sendable {
+        public var commitment: JSONValue
+        public var receipts: JSONValue
+        public var step: String
+        public var units: [String: String]
+        public var goalDigest: String?
+        public init(commitment: JSONValue, receipts: JSONValue, step: String, units: [String: String] = [:], goalDigest: String? = nil) {
+            self.commitment = commitment
+            self.receipts = receipts
+            self.step = step
+            self.units = units
+            self.goalDigest = goalDigest
+        }
+    }
+
+    /// The inputs of `authorize`. `operation`, `audience`, `resolveGrant`, `stateStore` and `isRevoked` are required; they
+    /// are optional here only so that a missing one is refused with its name instead of being a build error.
+    public struct AuthorizeInput {
+        /// What the handler WILL execute.
+        public var operation: Operation?
+        /// This resource server's id; the PCActn's signed `aud` must equal it.
+        public var audience: String?
+        /// `grant_ref -> grant` from your own store (nil = unknown grant; throwing denies).
+        public var resolveGrant: ((String) throws -> JSONValue?)?
+        /// The replay store.
+        public var stateStore: (any PCAStateStore)?
+        /// `(pcactn, grant) -> revoked?`. Only `false` passes; `true`, `nil` or a thrown error denies.
+        public var isRevoked: ((JSONValue, JSONValue) throws -> Bool?)?
+        /// Epoch milliseconds (default: the wall clock).
+        public var now: Int64?
+        /// `PCA.SINGLE_STEP` accepts a one-node plan whose node is exactly the operation. Otherwise `context` must return
+        /// the principal-authorized `plan` with `planAuthorized: true`.
+        public var plan: String?
+        /// `(pcactn) -> context` (throwing denies).
+        public var context: ((JSONValue) throws -> AuthorizeContext?)?
+        /// Forwarded to the core verifier.
+        public var intentPolicy: IntentPolicy?
+        /// Forwarded to the core verifier; its `params` default to the operation's.
+        public var intentV2: IntentV2Source?
+        public var allowedSuites: [String]?
+        /// Server-side PQ pins: grant issuer -> the PQ public key this server pins for it. Given (even empty), a non-Ed25519 (pure-PQ or hybrid)
+        /// grant passes `pq_pin` only if the pins hold an OWN entry for its issuer byte-equal to the grant's `pq_pk`; an Ed25519 grant always
+        /// passes. nil: the check is not reported (a PQ root is then trusted from the stored grant alone).
+        public var pqPins: [String: String]? = nil
+        /// Identity enforcement at the resource server: maps the grant issuer to what you know about it. With `requireVerifiedPrincipal` an
+        /// unresolved or unverified issuer denies (`principal`); without it the check is reported `pass` / `not-enforced`. A throw is a denial.
+        public var resolvePrincipal: ((String, JSONValue) throws -> PrincipalInfo?)? = nil
+        public var requireVerifiedPrincipal: Bool = false
+        /// Extra check names that must pass (the defaults always apply).
+        public var require: [String]
+        /// The pinned keys whose `EscalationAnswer`s count (empty: every `escalate` is refused). Needs a `PCALastStore`.
+        public var escalationPrincipals: [PinnedSigner]
+        /// The principal's signed answer for THIS action (parsed JSON; header `PCA-Escalation-Answer` via
+        /// `PCA.escalationAnswer(fromHeader:)`, or the body member `escalation_answer`).
+        public var escalationAnswer: JSONValue?
+        /// K7: recompute H(R), the canonical approval render digest, from the executed params and the verifier's own definition
+        /// (`Approval.render` + `Approval.renderDigest`); nil = none could be derived. By default an answer is admitted only over a
+        /// recomputed render and must be signed over exactly it.
+        public var escalationRender: ((JSONValue) -> String?)? = nil
+        /// The documented INSECURE opt-out: accept escalation answers with no recomputed render (an answer that carries a render is
+        /// still refused when none was recomputed).
+        public var insecureUnboundApproval: Bool = false
+        /// Revocation staleness (T9; off when nil or empty): caps how old the revocation state may be by the action's effective
+        /// reversibility class (the stricter of `context.reversibilityClass` and the signed class; missing or unknown counts as
+        /// irreversible). It needs `revocationState` (the state source) and, for a signed epoch, `guardianPublic` (plus
+        /// `guardianPins` for a post-quantum guardian). The result is the required `freshness` check; `isRevoked` stays the
+        /// revocation answer and works unchanged.
+        public var revocationStaleness: RevocationStalenessPolicy?
+        /// `(pcactn, grant) -> state` (throwing denies the `freshness` check).
+        public var revocationState: ((JSONValue, JSONValue) throws -> RevocationState?)?
+        /// The pinned Ed25519 identity (b64u) of the epoch guardian.
+        public var guardianPublic: String?
+        /// Which capability ids need a non-membership proof when staleness is on (default: every `id` in the PCActn's `cap_chain`).
+        public var revocationIds: ((JSONValue) -> [String])?
+        /// `(pcactn, id) -> proof` `{size, lo?, hi?}` against the epoch's root. Missing (no source, or nil) denies the `freshness` check.
+        public var revocationProof: ((JSONValue, String) -> JSONValue?)?
+        /// `{Ed25519 b64u: ML-DSA public key b64u}` for a post-quantum or hybrid guardian.
+        public var guardianPins: [String: String]?
+        /// Plan lifecycle (T10): the plan registry. When the context names no plan, the plan the PCActn commits to (`plan.root`) is looked
+        /// up for this grant: its nodes and whether it is executable now feed `plan_root_authorized`, and a plan that is not executable
+        /// (unknown, not yet authorized, expired, revoked) also fails `plan_state` with the registry's reason.
+        public var plans: PlanRegistry?
+        /// A high-assurance policy (T8): when the evidence behind the passing checks is weaker, missing, unlabelled, awaiting-audit, degraded or
+        /// unsupported, the `assurance` check fails and the request is denied before any replay state is written. `assuranceHooks` carries
+        /// the labels of the verifier's hooks (the report never trusts presented evidence). Every result carries the `assurance` report
+        /// whether or not a requirement is set.
+        public var requireAssurance: AssuranceRequirement?
+        /// Checks whose status may be `unsupported` without denying (today: `bond`).
+        public var allowUnsupported: [String] = []
+        public var assuranceHooks: AssuranceHooks
+        /// Caveat language v2 (K1; off unless set): the verifier's discharge-issuer pins and the discharges / narrow block /
+        /// SPIFFE ID / history it was given (`K1Input`). `actionDigest` is ignored: the verifier computes it from the PCActn.
+        /// Without it a chain carrying a K1 caveat is refused ("the caveat language is not configured (no k1 input)").
+        public var k1: K1Input?
+        /// Where `max_uses` is spent (an atomic first-use claim per slot; share and persist it across processes). A chain that
+        /// carries a `max_uses` caveat is refused when this is nil.
+        public var usesStore: (any PCAStateStore)?
+        /// Forwarded to the core verifier (`fresh_at` consistency token). nil: no policy (a PCActn carrying the member then fails closed).
+        public var freshAt: FreshAtPolicy?
+        /// The raw `pca-fresh-at` request header (the pre-member, side-carried token). Read only with a `freshAt` policy, when the
+        /// PCActn has no `fresh_at` member and the policy carries no `sideCarried`; unparseable JSON is a null token (`bad_token`).
+        public var freshAtHeader: String?
+        /// K5 workflow admission (C-308; off when nil): decides `workflowStep` with `Workflow.admitStep` BEFORE the replay store is touched, so a
+        /// refusal never consumes the PCActn's counter. The PCActn's `plan.root` must equal the workflow's committed plan root.
+        public var workflow: WorkflowGate?
+        /// The workflow step this call is (read only when `workflow` is set).
+        public var workflowStep: WorkflowCall?
+        /// Provenance by default (check `provenance_flow`, ALWAYS ON): a sensitive action (anything the `argProvenance.actions` facts do
+        /// not define as read-only, and every unknown action) is `escalate` unless its choice and every sink argument derive from the
+        /// principal: a verified mediator chain whose context was the principal's own message, a value the principal typed verbatim, an
+        /// executable principal-authorized plan from `plans`, or an admitted `workflow` step (choice only). A forged or malformed bundle
+        /// is `deny`. The only opt-out is the grant's signed envelope member `provenance: {mode: "insecure_off"}` (dangerous).
+        public var argProvenance: ArgProvenanceOptions
+        /// The provenance bundle for this call (`ProvenanceRecorder.forAction`); nil: read from `provenanceHeader`.
+        public var provenance: JSONValue?
+        /// The raw `PCA-Provenance` request header (base64url of the bundle's JSON). One that does not decode or parse is refused.
+        public var provenanceHeader: String?
+        /// Undo windows (optional; off when nil). Asked ONLY for an `escalate` with no escalation answer presented and no provenance
+        /// escalation (`provenance_flow` or rule 17 `provenance` failed): an admission turns the escalation into an allow that runs under
+        /// a veto window (`undo` and the `undo_window` obligation on the result). CONTRACT: return an admission only after your undo
+        /// coordinator (the TypeScript coordinator or the hosted ledger) has durably opened the window's record; nil or a throw is no
+        /// admission (the escalation stands). An admission whose obligation is malformed is ignored (fail closed).
+        public var undo: ((UndoAdmitRequest) throws -> UndoAdmission?)?
+        /// A server-side risk source `(operation, grant, pcactn) -> inputs`, merged with `context.risk` riskier-per-input (higher is riskier, except
+        /// reversibility and confidence). An input neither supplies is priced at its worst case; a throw denies (fail closed).
+        public var riskSource: ((Operation, JSONValue, JSONValue) throws -> JObject?)?
+        /// The threshold hook: for t above 1 it must report having enforced at least the server-derived t (F-1). Absent: such an action is denied.
+        public var thresholdHook: ((JSONValue) throws -> ThresholdOutcome)?
+        /// Risk inputs the server must supply (else `risk_inputs` fails).
+        public var requireRiskInputs: [String] = []
+        /// A tightened policy `(now) -> risk_policy` that can only NARROW the grant's: a higher required t refuses; an invalid one refuses.
+        public var adaptivePolicy: ((Int64) throws -> JSONValue?)?
+        /// Whether a stream with no stored budget and no context budget is seeded with the grant's `bMax` (default true; needs a `PCABudgetStore`).
+        public var seedBudget: Bool = true
+        /// F3 gates (see `AuthorizeGates.swift`): `requirePassport` + the call's `passport`; `forbid` + the call's `forbidCertificate`;
+        /// `requireLinkedTemplate`; a durable behavioural `contracts` enforcer; the `enforceFreshness` and `enforceTaint` core gates (checks
+        /// `freshness_anchor`, `taint_gate`); and a liveness `beacon` source (the required `beacon` check; needs a `PCAPinStore`).
+        public var requirePassport: RequirePassport? = nil
+        public var passport: JSONValue? = nil
+        public var forbid: ForbidGate? = nil
+        public var forbidCertificate: JSONValue? = nil
+        public var requireLinkedTemplate: LinkedTemplateGate? = nil
+        public var contracts: ContractEnforcer? = nil
+        public var enforceFreshness: FreshnessGate? = nil
+        public var enforceTaint: TaintGate? = nil
+        public var beacon: ((String, JSONValue) throws -> BeaconInput?)? = nil
+
+        public init(operation: Operation? = nil, audience: String? = nil, resolveGrant: ((String) throws -> JSONValue?)? = nil,
+                    stateStore: (any PCAStateStore)? = nil, isRevoked: ((JSONValue, JSONValue) throws -> Bool?)? = nil, now: Int64? = nil,
+                    plan: String? = nil, context: ((JSONValue) throws -> AuthorizeContext?)? = nil, intentPolicy: IntentPolicy? = nil,
+                    intentV2: IntentV2Source? = nil, allowedSuites: [String]? = nil, require: [String] = [],
+                    escalationPrincipals: [PinnedSigner] = [], escalationAnswer: JSONValue? = nil,
+                    revocationStaleness: RevocationStalenessPolicy? = nil, revocationState: ((JSONValue, JSONValue) throws -> RevocationState?)? = nil,
+                    guardianPublic: String? = nil, guardianPins: [String: String]? = nil, plans: PlanRegistry? = nil,
+                    requireAssurance: AssuranceRequirement? = nil, assuranceHooks: AssuranceHooks = AssuranceHooks(),
+                    k1: K1Input? = nil, usesStore: (any PCAStateStore)? = nil,
+                    freshAt: FreshAtPolicy? = nil, freshAtHeader: String? = nil,
+                    workflow: WorkflowGate? = nil, workflowStep: WorkflowCall? = nil, argProvenance: ArgProvenanceOptions = ArgProvenanceOptions(),
+                    provenance: JSONValue? = nil, provenanceHeader: String? = nil, undo: ((UndoAdmitRequest) throws -> UndoAdmission?)? = nil,
+                    riskSource: ((Operation, JSONValue, JSONValue) throws -> JObject?)? = nil) {
+            self.riskSource = riskSource
+            self.argProvenance = argProvenance
+            self.provenance = provenance
+            self.provenanceHeader = provenanceHeader
+            self.undo = undo
+            self.operation = operation
+            self.audience = audience
+            self.resolveGrant = resolveGrant
+            self.stateStore = stateStore
+            self.isRevoked = isRevoked
+            self.now = now
+            self.plan = plan
+            self.context = context
+            self.intentPolicy = intentPolicy
+            self.intentV2 = intentV2
+            self.allowedSuites = allowedSuites
+            self.require = require
+            self.escalationPrincipals = escalationPrincipals
+            self.escalationAnswer = escalationAnswer
+            self.revocationStaleness = revocationStaleness
+            self.revocationState = revocationState
+            self.guardianPublic = guardianPublic
+            self.guardianPins = guardianPins
+            self.plans = plans
+            self.requireAssurance = requireAssurance
+            self.assuranceHooks = assuranceHooks
+            self.k1 = k1
+            self.usesStore = usesStore
+            self.freshAt = freshAt
+            self.freshAtHeader = freshAtHeader
+            self.workflow = workflow
+            self.workflowStep = workflowStep
+        }
+    }
+
+    /// The outcome of `authorize`. `allow` is the one thing a caller must branch on.
+    ///
+    /// `status` is 200, 401 (no, undecodable or unauthenticated proof) or 403. `checks` maps each check to its status
+    /// (`checkNames` lists them in evaluation order); `reason` is the decisive one (an `operation` failure first). `missing`
+    /// names configuration components that were absent (the call was refused before any verification).
+    public struct AuthorizeResult {
+        public let allow: Bool
+        public let status: Int
+        public let checks: [String: CheckStatus]
+        public let checkNames: [String]
+        public let reasons: [String]
+        public let reason: String?
+        public let operation: AuthorizedOperation?
+        public let pcactn: JSONValue?
+        public let verdict: Verdict?
+        public let missing: [String]?
+        /// `allow` (and `allow` is true), `escalate` (refused, 403: `escalation` is the request to put to the principal) or `deny`.
+        /// `allow` is exactly `decision == "allow"`: an `escalate` is never `allow: true`.
+        public var decision: String = "deny"
+        /// `escalate`: the request (`pca-escalation-request`) for the principal. An allow admitted by an answer: `{answered_by}`.
+        public var escalation: JSONValue? = nil
+        /// Names the passing checks that rest on a compatibility mode (check name -> why): `tighten` under rule 21's `model_polarity`
+        /// "legacy". A caller with a high-assurance policy must not accept a degraded pass.
+        public var degraded: [String: String] = [:]
+        /// The per-check report: what each passing check rests on (see `PCA.buildAssuranceReport`). The capability chain check is reported as
+        /// `cap_chain`.
+        public var assurance = AssuranceReport()
+        /// The veto window an escalation was converted to (the `undo` hook admitted it); `allow` is then true.
+        public var undo: UndoAdmission? = nil
+        /// The obligations an allow carries (the `undo_window` obligation of `undo`): perform them, or refuse.
+        public var obligations: [JSONValue] = []
+        /// `forbid`: the recomputed forbid-wins certificate of an allowed operation.
+        public var forbidCertificate: JSONValue? = nil
+        /// `requireLinkedTemplate`: `linked` when the grant is the instantiation of its linked template.
+        public var template: String? = nil
+        /// `requirePassport`: the verified passport.
+        public var passport: PassportVerdict? = nil
+
+        /// The names of the failing checks, sorted.
+        public var failedChecks: [String] { checks.filter { $0.value == .fail }.map { $0.key }.sorted() }
+    }
+
+    /// Insertion-ordered check statuses (the decisive reason follows evaluation order).
+    struct CheckList {
+        var order: [String] = []
+        var map: [String: CheckStatus] = [:]
+        mutating func set(_ name: String, _ s: CheckStatus) {
+            if map[name] == nil { order.append(name) }
+            map[name] = s
+        }
+        subscript(_ name: String) -> CheckStatus? { map[name] }
+        var anyFail: Bool { map.values.contains(.fail) }
+    }
+
+    static func refuse(_ status: Int, _ check: String, _ reason: String, missing: [String]? = nil, pcactn: JSONValue? = nil) -> AuthorizeResult {
+        AuthorizeResult(allow: false, status: status, checks: [check: .fail], checkNames: [check], reasons: [reason], reason: reason,
+                        operation: nil, pcactn: pcactn, verdict: nil, missing: missing)
+    }
+
+    /// Names of the required components `input` lacks (empty = complete): `audience`, `resolveGrant`, `stateStore`,
+    /// `isRevoked`, in that order.
+    public static func missingAuthorizeComponents(_ input: AuthorizeInput) -> [String] {
+        var missing: [String] = []
+        if (input.audience ?? "").isEmpty { missing.append("audience") }
+        if input.resolveGrant == nil { missing.append("resolveGrant") }
+        if input.stateStore == nil { missing.append("stateStore") }
+        if input.isRevoked == nil { missing.append("isRevoked") }
+        if let sp = input.revocationStaleness, sp.isOn {
+            if input.revocationState == nil { missing.append("revocationState (required by revocationStaleness)") }
+            if let why = sp.validate() { missing.append("revocationStaleness (invalid: \(why))") }
+            if input.stateStore != nil && !(input.stateStore is PCAPinStore) {
+                missing.append("stateStore (revocation staleness needs a state store that implements pins (rollback protection))")
+            }
+        }
+        if input.beacon != nil && input.stateStore != nil && !(input.stateStore is PCAPinStore) {
+            missing.append("stateStore (beacon needs a state store that implements pins (replay protection))")
+        }
+        // an answer is bound to the holder's history head: a store that cannot report it cannot admit one (refused up front)
+        if !input.escalationPrincipals.isEmpty && !(input.stateStore is PCALastStore) { missing.append("stateStore.last (needed with escalationPrincipals)") }
+        return missing
+    }
+
+    /// The store key of a holder's counter stream (`<grant id>:<leaf holder>`).
+    public static func stateKey(grantId: String, leafHolder: String) -> String { "\(grantId):\(leafHolder)" }
+
+    // ---- the envelope ----
+
+    static func validateRiskPolicy(_ p: JSONValue?) -> String? {
+        // a JSON array is a JS object without these members (it then fails on the first member, as the reference)
+        func members(_ v: JSONValue?) -> JObject? { if case let .object(o)? = v { return o }; if case .array? = v { return [:] }; return nil }
+        guard let o = members(p) else { return "risk_policy must be an object" }
+        guard let w = members(o["weights"]) else { return "risk_policy.weights missing" }
+        for k in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"] {
+            guard let v = ToolSchema.fin(w[JKey(k)]), v >= 0 else { return "risk_policy.weights.\(k) must be finite and >= 0" }
+        }
+        guard let t1 = ToolSchema.fin(o["theta1"]) else { return "risk_policy.theta1 must be finite" }
+        guard let t2 = ToolSchema.fin(o["theta2"]) else { return "risk_policy.theta2 must be finite" }
+        guard let kappa = ToolSchema.fin(o["kappa"]) else { return "risk_policy.kappa must be finite" }
+        guard let lambda = ToolSchema.fin(o["lambda"]) else { return "risk_policy.lambda must be finite" }
+        guard let rho = ToolSchema.fin(o["rho"]) else { return "risk_policy.rho must be finite" }
+        guard let bMax = ToolSchema.fin(o["bMax"]) else { return "risk_policy.bMax must be finite" }
+        if t1 < 0 || t2 < t1 { return "risk_policy requires 0 <= theta1 <= theta2" }
+        if kappa <= 0 { return "risk_policy.kappa must be > 0" }
+        if lambda < 0 || rho < 0 || bMax < 0 { return "risk_policy lambda/rho/bMax must be >= 0" }
+        return nil
+    }
+
+    /// The grant's policy envelope: its FIRST `envelope` caveat without `type`, or nil when absent or malformed.
+    public static func readEnvelope(_ grant: JSONValue) -> JSONValue? {
+        guard case let .array(cs)? = grant.get("caveats"),
+              let cv = cs.first(where: { ToolSchema.eqs($0.get("type"), ENVELOPE_CAVEAT) }), case var .object(e) = cv else { return nil }
+        e["type"] = nil
+        guard case .string? = e["goal_commit"], case .array? = e["predicates"], case .array? = e["caveats"] else { return nil }
+        switch e["agent_binding"] {
+        case .object?, .array?: break
+        default: return nil
+        }
+        if validateRiskPolicy(e["risk_policy"]) != nil { return nil }
+        return .object(e)
+    }
+
+    /// Every root caveat except the first `envelope` one; a `caveats` that is not an array is returned as is.
+    public static func rootCaveats(_ grant: JSONValue) -> JSONValue? {
+        guard let csv = grant.get("caveats") else { return nil }
+        guard case var .array(cs) = csv else { return csv }
+        if let i = cs.firstIndex(where: { ToolSchema.eqs($0.get("type"), ENVELOPE_CAVEAT) }) { cs.remove(at: i) }
+        return .array(cs)
+    }
+
+    /// Any agent pin in `agent_binding` requires a bound attestation.
+    static func requiresAttestation(_ binding: JSONValue?) -> Bool {
+        let b = binding?.asObject ?? [:]
+        func nonEmpty(_ k: String) -> Bool { if case let .array(a)? = b[JKey(k)] { return !a.isEmpty }; return false }
+        let hasMin: Bool = { guard let m = b["min_measurement"] else { return false }; return !ToolSchema.eqs(m, "") }()
+        let hasOperator: Bool = { if case let .string(s)? = b["operator"] { return !s.isEmpty }; return false }()
+        return nonEmpty("model_allowlist") || hasMin || hasOperator || nonEmpty("weights_allowlist") || nonEmpty("system_prompt_allowlist")
+            || nonEmpty("tool_manifest_allowlist") || b["require_hardware"] == .bool(true) || b["require_measured_weights"] == .bool(true)
+    }
+
+    // ---- the agent-native caveat evaluator ----
+
+    /// Evaluate a tool call against a `tool_schema` caveat: `(ok, reason)`. Never throws.
+    public static func evaluateToolSchema(_ caveat: JSONValue?, call: ToolCall?) -> (ok: Bool, reason: String?) {
+        ToolSchema.evaluate(caveat, call)
+    }
+
+    static func agentCaveatSatisfied(_ cv: JSONValue, _ ctx: JSONValue, _ actx: JSONValue, _ call: ToolCall?, _ budget: SafeRegex.Budget) -> Bool {
+        guard case let .object(c) = cv, ctx.isObject else { return false }
+        if ToolSchema.eqs(c["type"], "tool_schema") { return ToolSchema.evaluate(cv, call).ok }
+        if ToolSchema.eqs(c["type"], "predicates") {
+            guard actx.isObject, case let .array(allow)? = c["allow"] else { return false }
+            return allow.contains { Predicates.predicateMatches($0, actx, budget) }
+        }
+        // max_spend and the stock types: the 0.4.1 evaluator (unknown types fail closed there)
+        return evaluateCaveats(.array([cv]), context: ctx).ok
+    }
+
+    static func evaluateAgentCaveats(_ caveats: JSONValue?, _ ctx: JSONValue, _ actx: JSONValue?, _ call: ToolCall?, _ budget: SafeRegex.Budget) -> (ok: Bool, failed: [String]) {
+        guard case let .array(list)? = caveats else { return (false, ["<malformed caveats>"]) }
+        if !list.isEmpty && !ctx.isObject { return (false, ["<evaluation error>"]) }
+        var failed: [String] = []
+        for cv in list where !agentCaveatSatisfied(cv, ctx, actx ?? .object([:]), call, budget) {
+            failed.append(cv.get("type")?.asString ?? "<malformed>")
+        }
+        return (failed.isEmpty, failed)
+    }
+
+    /// The agent-native caveat evaluator: the stock types of `evaluateCaveats`, plus `predicates` (`allow`: the action must
+    /// match one predicate; needs `actionContext` = `{"action": {...}, "subject"?, "env"?}`) and `tool_schema` (needs
+    /// `toolCall`). `context` is the stock context (`now`, `action`, `blast_radius`, ...). Unknown types fail closed.
+    /// Returns `(ok, failed types)`. One regex work budget per call.
+    public static func evaluateAgentCaveats(_ caveats: JSONValue?, context: JSONValue, actionContext: JSONValue? = nil,
+                                            toolCall: ToolCall? = nil) -> (ok: Bool, failed: [String]) {
+        evaluateAgentCaveats(caveats, context, actionContext, toolCall, SafeRegex.Budget())
+    }
+
+    /// `evaluatePredicates`: nil when some predicate permits the action, else the reason.
+    static func envelopePredicatesError(_ preds: JSONValue?, _ actx: JSONValue, _ budget: SafeRegex.Budget) -> String? {
+        guard case let .array(ps)? = preds, !ps.isEmpty else { return "envelope grants no predicates" }
+        if ps.contains(where: { Predicates.predicateMatches($0, actx, budget) }) { return nil }
+        let a = actx.get("action")
+        let at = "\(IntentWB.jsOpt(a?.get("verb"))) on \(IntentWB.jsOpt(a?.get("resource")))"
+        if let limit = Predicates.firstUnmetLimit(preds, actx, budget) { return "\(limit) not satisfied for \(at)" }
+        return "no predicate permits \(at)"
+    }
+
+    // ---- authorize ----
+
+    static let CLASS_RANK: [String: Int] = ["reversible": 0, "rate_limited": 1, "costly": 1, "irreversible": 2]
+
+    static func classRank(_ c: JSONValue?) -> Int {
+        guard case let .string(s)? = c, s.unicodeScalars.allSatisfy({ $0.isASCII }) else { return 2 }
+        return CLASS_RANK[s] ?? 2
+    }
+
+    static func decisive(_ checks: CheckList, _ reasons: [String]) -> String {
+        let first = ["operation", "plan_state"] // a binding failure explains the others; then the plan state (server/authorize.ts RANK)
+        let names = first.filter { checks.order.contains($0) } + checks.order.filter { !first.contains($0) }
+        for n in names where checks[n] == .fail {
+            if let hit = reasons.first(where: { IV.startsWith($0, n + ":") }) { return hit }
+        }
+        return reasons.first ?? "denied"
+    }
+
+    /// Authorize ONE operation for a parsed PCActn (nil = none presented). See the README for the pipeline.
+    public static func authorize(pcactn: JSONValue?, _ input: AuthorizeInput) -> AuthorizeResult {
+        guard let v = pcactn else { return run(nil, "absent", input) }
+        return run(v.isObject ? v : nil, v.isObject ? nil : "undecodable", input)
+    }
+
+    /// Authorize ONE operation for a PCActn as received (JSON text, strict profile; nil = none presented).
+    public static func authorize(json text: String?, _ input: AuthorizeInput) -> AuthorizeResult {
+        guard let t = text else { return run(nil, "absent", input) }
+        if t.utf8.count > MAX_ARTIFACT_BYTES { return run(nil, "undecodable", input) }
+        guard let v = try? StrictJSON.parse(t), v.isObject else { return run(nil, "undecodable", input) }
+        return run(v, nil, input)
+    }
+
+    struct InternalError: Error { let what: String }
+
+    static func run(_ p: JSONValue?, _ parseErr: String?, _ input: AuthorizeInput) -> AuthorizeResult {
+        do {
+            return try authorizeSteps(p, parseErr, input)
+        } catch {
+            let what = (error as? InternalError)?.what ?? "\(type(of: error))"
+            return refuse(403, "authorize", "authorize: error (fail closed): \(what)")
+        }
+    }
+
+    /// What a `resolvePrincipal` hook reports about a grant issuer (TS `PcaPrincipalInfo`).
+    public struct PrincipalInfo: Equatable, Sendable {
+        public var pub: String
+        public var subjectType: String
+        public var subjectId: String?
+        public var verified: Bool
+        public init(pub: String, subjectType: String, subjectId: String?, verified: Bool) {
+            self.pub = pub
+            self.subjectType = subjectType
+            self.subjectId = subjectId
+            self.verified = verified
+        }
+    }
+
+    /// Riskier of two risk-input maps per input: higher is riskier, except reversibility and confidence (lower is riskier).
+    static func riskier(_ a: JObject?, _ b: JObject?) -> JObject? {
+        guard let a = a else { return b }
+        guard let b = b else { return a }
+        var out = a
+        for (k, v) in b {
+            guard let y = ToolSchema.fin(v) else { continue }
+            if let x = ToolSchema.fin(a[k]) { out[k] = .double(k.s == "reversibility" || k.s == "confidence" ? min(x, y) : max(x, y)) } else { out[k] = .double(y) }
+        }
+        return out
+    }
+
+    /// The server's risk inputs for a money-moving operation: `blastRadius = params.amount / kappa` (clamped to [0, 1]) from the grant's own risk
+    /// policy; nil when there is no numeric amount (the verifier then prices every input at its worst case).
+    public static let amountRisk: (Operation, JSONValue, JSONValue) throws -> JObject? = { op, grant, _ in
+        guard let amount = ToolSchema.fin(op.params.get("amount")), let rp = readEnvelope(grant)?.get("risk_policy"),
+              let kappa = ToolSchema.fin(rp.get("kappa")), kappa > 0 else { return nil }
+        return ["blastRadius": .double(min(1, max(0, amount / kappa)))]
+    }
+
+    /// The test-and-example helper for a calm operation: every input at its safest, so r = 0 (t = 1). INSECURE: it makes the risk decision
+    /// vacuous, so a real server prices its own risk (see `AuthorizeContext.risk` and `AuthorizeInput.riskSource`).
+    public static let insecureCalmRisk: (Operation, JSONValue, JSONValue) throws -> JObject? = { _, _, _ in
+        ["semanticDistance": .int(0), "reversibility": .int(1), "blastRadius": .int(0), "taint": .int(0), "confidence": .int(1), "age": .int(0)]
+    }
+
+    /// The server-side PQ pin rule (TS verify.ts pqPins): fail closed. Own entries only; an Ed25519 grant (absent `alg` is ed25519) needs no pin.
+    static func pqPinCheck(grant g: JObject, pins: [String: String]) -> (pass: Bool, reason: String) {
+        let alg = g["alg"]?.asString ?? "ed25519"
+        let issuer = g["issuer"]?.asString ?? ""
+        let pin = pins[issuer]
+        if alg == "ed25519" {
+            // a pin exists so that a holder of the issuer's CLASSICAL key cannot mint grants: a classical grant from a pinned issuer is refused
+            if pin != nil { return (false, "the grant issuer is pinned to a post-quantum key; a classical grant is refused") }
+            return (true, "")
+        }
+        if let p = pin, let pk = g["pq_pk"]?.asString, p == pk { return (true, "") }
+        return (false, pin == nil ? "no server-side PQ pin for the grant issuer (suite \(alg))" : "the grant pq_pk does not match the server-side pin")
+    }
+
+    static func authorizeSteps(_ pIn: JSONValue?, _ parseErr: String?, _ input: AuthorizeInput) throws -> AuthorizeResult {
+        var missing = missingAuthorizeComponents(input)
+        if let pl = input.plan, !IV.same(pl, SINGLE_STEP) { missing.append("plan (only '\(SINGLE_STEP)' or nil)") }
+        guard missing.isEmpty, let audience = input.audience, let resolveGrant = input.resolveGrant,
+              let store = input.stateStore, let isRevoked = input.isRevoked else {
+            return refuse(403, "authorize_config", "authorize_config: missing required component(s): \(missing.joined(separator: ", ")) (fail closed)",
+                          missing: missing)
+        }
+        guard let opIn = input.operation, opIn.isValid else {
+            return refuse(403, "operation", "operation: authorize needs the operation to execute (verb, resource, params) (fail closed)")
+        }
+        // a private copy in the strict profile: the params that are verified are exactly what was digested
+        guard let canon = IV.strictCanon(opIn.params), let opParams = try? StrictJSON.parse(canon), let opDigest = IV.strictHash(opParams) else {
+            throw InternalError(what: "the operation params are outside the strict JSON profile")
+        }
+        let op = Operation(verb: opIn.verb, resource: opIn.resource, params: opParams)
+
+        let now = input.now ?? Int64(Date().timeIntervalSince1970 * 1000)
+        // F3 gates that refuse BEFORE the PCActn is verified and before any replay state is touched: passport, forbid, linked template
+        var passportLeaf: String?
+        var passportVerdict: PassportVerdict?
+        if let rp = input.requirePassport, let leaf = presentedLeaf(pIn) {
+            let r = passportRefusal(pIn, rp, input.passport, now)
+            if let why = r.refusal { return refuse(403, "passport", why) }
+            passportLeaf = leaf
+            passportVerdict = r.verdict
+        }
+        var forbidCert: JSONValue?
+        if let f = input.forbid {
+            do {
+                let o = try forbidGate(pIn, f, op, resolveGrant, input.forbidCertificate)
+                if let why = o.refusal { return refuse(403, "forbid", why) }
+                forbidCert = o.certificate
+            } catch {
+                return refuse(403, "authorize", "authorize error (fail closed): \(error)")
+            }
+        }
+        if let lt = input.requireLinkedTemplate, let ref = pIn?.get("grant_ref")?.asString {
+            // an unreadable PCActn or grant source is left to the verification that follows (the check below is authoritative)
+            var pre: JSONValue?
+            var readable = true
+            do { pre = try resolveGrant(ref) } catch { readable = false }
+            if readable, let why = try? linkError(pre, lt) { return refuse(403, "template", why) }
+        }
+        // provenance commitments: an executable principal-authorized plan from the registry; an admitted workflow step (the choice only)
+        var principalPlan = false
+        var principalControl = false
+
+        // K5 workflow admission, before the PCActn is verified and before any replay state is written. A required gate with no step refuses
+        // first (it needs no PCActn); an unreadable or absent PCActn is not judged by the gate (the wire refusal below answers it); the plan
+        // root is read from the presented (unverified) PCActn.
+        if let wg = input.workflow {
+            if let wc = input.workflowStep, pIn != nil {
+                var units: JObject = [:]
+                for (k, u) in wc.units { units[JKey(k)] = .string(u) }
+                var root: JSONValue = .null
+                if let rs = pIn?.get("plan")?.get("root")?.asString { root = .string(rs) }
+                let req: JSONValue = .object(["step": .string(wc.step), "verb": .string(op.verb), "resource": .string(op.resource), "params": op.params,
+                                              "units": .object(units), "goal_digest": wc.goalDigest.map { JSONValue.string($0) } ?? .null, "plan_root": root])
+                let d = Workflow.admitStep(workflow: wc.commitment, principal: wg.principal, rsSigner: wg.rsSigner, receipts: wc.receipts, now: now, request: req)
+                if d.decision != "allow" {
+                    var r = refuse(403, "workflow", "workflow: \(d.code ?? "refused")" + (d.step.map { " (step \($0))" } ?? ""))
+                    if d.decision == "escalate" { r.decision = "escalate" }
+                    return r
+                }
+                principalControl = true
+            } else if input.workflowStep == nil, wg.required {
+                return refuse(403, "workflow", "workflow: this call carries no workflow step (fail closed)")
+            }
+        }
+
+        if let ce = input.contracts, let why = contractRefusal(ce.peek(contractAction(op))) { return refuse(403, "contract", why) }
+
+        guard let pv = pIn, case let .object(p) = pv else {
+            return parseErr == "absent" ? refuse(401, "wire", "wire: no PCActn presented")
+                                        : refuse(401, "pcactn", "undecodable PCActn: not a strict-JSON object")
+        }
+        guard case let .string(grantRef)? = p["grant_ref"] else {
+            return refuse(401, "malformed", "malformed: grant_ref is not a string", pcactn: pv)
+        }
+        let grantOpt: JSONValue?
+        do { grantOpt = try resolveGrant(grantRef) } catch {
+            return refuse(403, "resolve_grant", "resolve_grant: grant resolution failed (fail closed)", pcactn: pv)
+        }
+        guard let grant = grantOpt, case let .object(g) = grant else {
+            return refuse(401, "grant_ref", "grant_ref: does not resolve to a known grant", pcactn: pv)
+        }
+
+        var ctx = AuthorizeContext()
+        if let cb = input.context {
+            do { ctx = try cb(pv) ?? AuthorizeContext() } catch {
+                return refuse(403, "context", "context: the context callback failed (fail closed)", pcactn: pv)
+            }
+        }
+
+        var planStatus: PlanStatus?
+        if let reg = input.plans, ctx.plan == nil {
+            let root = p["plan"]?.get("root")?.asString ?? ""
+            if let pc = reg.context(grantRef: grantRef, root: root, now: now) {
+                ctx.plan = pc.plan
+                ctx.planAuthorized = pc.planAuthorized
+                planStatus = pc.status
+                principalPlan = pc.planAuthorized // PlanRegistry.context: planAuthorized is status.executable
+            } else if !(input.plan.map { IV.same($0, SINGLE_STEP) } ?? false) {
+                // TS authorize.ts:320: with `plan: single-step` configured an unknown root is the single-step plan; without it, it is unknown
+                planStatus = PlanStatus(state: .unknown, executable: false, reason: "plan \(root) is unknown to the plan registry")
+            }
+        }
+
+        var v2: IntentV2Context?
+        switch input.intentV2 {
+        case let .context(c)?: v2 = c
+        case let .provider(f)?:
+            do { v2 = try f(pv) } catch {
+                return refuse(403, "intent_v2", "intent_v2: verifier state unavailable (fail closed)", pcactn: pv)
+            }
+        case nil: v2 = nil
+        }
+        // Rules 20 / 21 read the signed envelope of the stored grant: when it carries units / tighten / model_polarity or a grant-side
+        // where reads a model-derived path, the v2 pipeline needs the plaintext params and the host env even without a v2 context.
+        if v2 == nil && needsModelRules(grant) { v2 = IntentV2Context(.object([:])) }
+        if let c = v2, case var .object(o) = c.value {
+            if o["params"] == nil || o["params"] == .null { o["params"] = op.params }
+            if o["env"] == nil || o["env"] == .null { // `intentV2.env ?? ctx.env`: a null env is the authorize context's
+                o["env"] = nil
+                if let he = ctx.env, !he.isNull { o["env"] = he }
+            }
+            v2 = IntentV2Context(.object(o))
+        }
+
+        // ---- 1. the core checks
+        var freshAt = input.freshAt
+        if var fp = freshAt, pv.get("fresh_at") == nil, fp.sideCarried == nil, let h = input.freshAtHeader {
+            fp.sideCarried = (try? StrictJSON.parse(h)) ?? .null
+            freshAt = fp
+        }
+        let core = verify(pcactn: pv, grant: grant, now: now, audience: .id(audience), allowedSuites: input.allowedSuites,
+                          intentPolicy: input.intentPolicy, intentV2: v2, freshAt: freshAt,
+                          insecureSkipPlanRootCheck: true) // authorize checks plan_root_authorized itself (below); there is no skip option on authorize
+        if core.checks["wire"] == false {
+            let r = core.reason.isEmpty ? "wire: malformed PCActn" : core.reason
+            return AuthorizeResult(allow: false, status: 401, checks: ["wire": .fail, "malformed": .fail], checkNames: ["wire", "malformed"],
+                                   reasons: [r], reason: r, operation: nil, pcactn: pv, verdict: core, missing: nil)
+        }
+        var checks = CheckList()
+        let coreNames = CORE_CHECK_ORDER.filter { core.checks[$0] != nil } + core.checks.keys.filter { !CORE_CHECK_ORDER.contains($0) }.sorted()
+        for n in coreNames { checks.set(n, core.checks[n] == true ? .pass : .fail) }
+        var reasons: [String] = core.allow ? [] : core.reasons
+        func fail(_ name: String, _ why: String) {
+            checks.set(name, .fail)
+            reasons.append("\(name): \(why)")
+        }
+
+        if p["bond_ref"] != nil { checks.set("bond", .unsupported) }
+
+        // ---- 2. revocation (required)
+        let revoked: Bool?
+        do { revoked = try isRevoked(pv, grant) } catch { revoked = nil }
+        if revoked == false {
+            checks.set("revocation", .pass)
+        } else {
+            fail("revocation", revoked == true ? "the grant is revoked" : "the revocation check failed (fail closed)")
+        }
+        var freshEpoch: Double? // the signed epoch a passing freshness check accepted: pinned after the action is allowed
+        if let sp = input.revocationStaleness, sp.isOn, let source = input.revocationState {
+            var st: RevocationState?
+            var failed = false
+            do { st = try source(pv, grant) } catch { failed = true }
+            if failed {
+                fail("freshness", "the revocation state source failed (fail closed)")
+            } else if let why = revocationFreshness(input, ctx, p, st, now) {
+                fail("freshness", why)
+            } else {
+                checks.set("freshness", .pass)
+                freshEpoch = IV.num(st?.epoch?.asObject?["epoch"])
+            }
+        }
+
+        // F3 core gates: the information-flow taint and the signed freshness anchor (own check names), then the liveness beacon
+        if let tg = input.enforceTaint {
+            let r = Taint.gate(p["provenance"], registry: tg.registry, resourceGraphNode: tg.resourceGraphNode, maxTaint: tg.maxTaint)
+            if r.ok { checks.set("taint_gate", .pass) } else { fail("taint_gate", r.reason ?? "rejected") }
+        }
+        if let fg = input.enforceFreshness {
+            if let why = freshnessAnchorError(p, fg, now) { fail("freshness_anchor", why) } else { checks.set("freshness_anchor", .pass) }
+        }
+        var beaconSeq: Double?
+        if let bsrc = input.beacon {
+            let bc = try bsrc(grantRef, pv)
+            var lastSeq: Double?
+            var bv: BeaconVerdict?
+            if let b = bc {
+                var stored: Double?
+                if let gid = g["id"]?.asString, let ps = store as? PCAPinStore { stored = try ps.pin(key: gid + ":beacon") }
+                lastSeq = [stored, b.lastAcceptedSeq.map { Double($0) }].compactMap { $0 }.max()
+                bv = Beacons.verifyLivenessBeacon(b.beacon, issuers: b.issuers, now: now, instance: b.instance, scope: g["id"]?.asString, pqPins: b.pqPins)
+            }
+            let bok = bv?.ok ?? false
+            let seqV = bc.flatMap { IV.num($0.beacon.get("seq")) }
+            let replayed = bc != nil && bok && lastSeq != nil && seqV != nil && seqV! < lastSeq!
+            var binds = false
+            if let b = bc, bok, !replayed {
+                do { binds = IV.same(p["freshness"]?.get("beacon_ref")?.asString, try Beacons.beaconRef(b.beacon)) } catch {
+                    throw InternalError(what: "the beacon is outside the strict JSON profile")
+                }
+            }
+            switch Beacons.beaconDecision(present: bc != nil, ok: bok, replayed: replayed, refBinds: binds) {
+            case "rejected": fail("beacon", bv?.reason ?? "beacon rejected")
+            case "replayed": fail("beacon", "beacon seq \(PD.js(bc?.beacon.get("seq"))) is older than the last accepted \(PD.numStr(lastSeq ?? 0)) (replay)")
+            case "unbound": fail("beacon", "PCActn freshness.beacon_ref does not bind the presented beacon")
+            case "pass":
+                checks.set("beacon", .pass)
+                beaconSeq = seqV
+            default: checks.set("beacon", .notEnforced)
+            }
+        }
+
+        let action = p["action"]?.asObject ?? [:]
+        let signedDigest = action["params_digest"]
+
+        // ---- 3. the operation binding
+        if !ToolSchema.eqs(action["verb"], op.verb) || !ToolSchema.eqs(action["resource"], op.resource) {
+            fail("operation", "the proof is for \(IntentWB.jsOpt(action["verb"])) on \(IntentWB.jsOpt(action["resource"])), but this operation is \(op.verb) on \(op.resource)")
+        } else if !ToolSchema.eqs(signedDigest, opDigest) {
+            fail("operation", "the proof's params_digest does not match the params of this \(op.verb) operation")
+        } else {
+            checks.set("operation", .pass)
+        }
+
+        // ---- 4. grant_ref, params, plan, attestation, reversibility
+        if let resolve = input.resolvePrincipal {
+            var verified = false
+            var broke = false
+            do { verified = try resolve(IntentWB.jsOpt(g["issuer"]), grant)?.verified ?? false } catch { broke = true }
+            if broke { fail("principal", "the principal resolver failed (fail closed)") }
+            else if input.requireVerifiedPrincipal && !verified { fail("principal", "the grant issuer is not an enrolled, verified principal") }
+            else { checks.set("principal", verified ? .pass : .notEnforced) }
+        } else if input.requireVerifiedPrincipal {
+            fail("principal", "requireVerifiedPrincipal needs a resolvePrincipal resolver")
+        }
+        if let pins = input.pqPins {
+            let r = pqPinCheck(grant: g, pins: pins)
+            if r.pass { checks.set("pq_pin", .pass) } else { fail("pq_pin", r.reason) }
+        }
+        if ToolSchema.eqs(g["id"], grantRef) {
+            checks.set("grant_ref", .pass)
+        } else {
+            fail("grant_ref", "does not reference the supplied grant")
+        }
+        if ToolSchema.eqs(signedDigest, opDigest) {
+            checks.set("params_digest", .pass)
+        } else {
+            fail("params_digest", "supplied params do not hash to action.params_digest")
+        }
+
+        let pl = p["plan"]?.asObject ?? [:]
+        let nodeId = pl["node_id"]
+        var planNodes: [JSONValue]? = ctx.plan
+        var planAuthorized = ctx.planAuthorized
+        if let mode = input.plan, IV.same(mode, SINGLE_STEP), planNodes == nil {
+            var node: JObject = ["id": .string(IntentWB.jsOpt(nodeId)), "verb": .string(op.verb), "resource": .string(op.resource),
+                                 "params_digest": .string(opDigest)]
+            if let rc = action["reversibility_class"] { node["reversibility_class"] = rc }
+            planNodes = [.object(node)]
+            planAuthorized = true
+        }
+        if let nodes = planNodes {
+            let known = knownPlanRoot(nodes)
+            if known == nil || !ToolSchema.eqs(pl["root"], known ?? "") {
+                fail("plan_root_authorized", "known plan does not match plan.root")
+            } else if !planAuthorized {
+                fail("plan_root_authorized", "the plan root has not been authorized by the principal")
+            } else {
+                checks.set("plan_root_authorized", .pass)
+            }
+        } else {
+            // K5 default-deny: no plan source configured fails (there is deliberately NO insecureSkipPlanRootCheck on authorize)
+            fail("plan_root_authorized", "default-deny: no authorized plan is configured for this verifier (supply the plan and its authorization, or set insecureSkipPlanRootCheck)")
+        }
+
+        if let ps = planStatus {
+            if ps.executable {
+                checks.set("plan_state", .pass)
+            } else {
+                fail("plan_state", (ps.reason ?? "").isEmpty ? "plan is \(ps.state.rawValue)" : ps.reason!)
+            }
+        }
+
+        let env = readEnvelope(grant)
+        if requiresAttestation(env?.get("agent_binding")) {
+            fail("attestation", "the grant binds the agent (agent_binding) so a valid, bound attestation is REQUIRED (no attestation verifier in this SDK: fail closed)")
+        }
+
+        let declared = action["reversibility_class"]
+        var effective = declared
+        if let serverClass = ctx.reversibilityClass {
+            let dr = classRank(declared), sr = classRank(.string(serverClass))
+            if dr < sr {
+                fail("reversibility", "declared class '\(IntentWB.jsOpt(declared))' is less restrictive than the authoritative '\(serverClass)'")
+            } else {
+                checks.set("reversibility", .pass)
+            }
+            effective = dr > sr ? declared : .string(serverClass)
+        }
+
+        // ---- 5. policy: envelope predicates + envelope caveats + root caveats; then the delegated caveats
+        let chain = p["cap_chain"]?.asArray ?? []
+        let depth = max(0, chain.count - 1)
+        var inner: JObject = ["params": op.params]
+        if let x = action["verb"] { inner["verb"] = x }
+        if let x = action["resource"] { inner["resource"] = x }
+        if let e = effective { inner["reversibility_class"] = e }
+        var actx: JObject = ["action": .object(inner)]
+        if let s = ctx.subject { actx["subject"] = s }
+        if let e = v2Env(p, grant, v2, now, ctx.env) { actx["env"] = e }
+        let actionCtx = JSONValue.object(actx)
+        let toolCall = ToolCall(tool: action["verb"]?.asString ?? "", args: op.params, toolSignatureDigest: p["tool_binding"]?.asString)
+        var cctx: JObject = ["now": .int(now), "action": .object(inner), "delegation_depth": .int(Int64(depth))]
+        if let b = ctx.blastRadius { cctx["blast_radius"] = .double(b) }
+        if let r = effective { cctx["reversibility_class"] = r } // the wire requires a declared class, so the plan node's is never the fallback
+        if let t = ctx.recentActionTimes { cctx["recent_action_times"] = .array(t.map { .double($0) }) }
+        let caveatCtx = JSONValue.object(cctx)
+
+        var k1Bound: [BoundCaveat]?
+        if !chain.isEmpty {
+            let leaf = chain[chain.count - 1].asObject ?? [:]
+            let gcs = g["caveats"]?.asArray ?? []
+            var extra: JSONValue?
+            if case let .array(lc)? = leaf["caveats"] { extra = .array(Array(lc.dropFirst(gcs.count))) }
+            // K1 caveat types (and the caveats of a verified narrow block) are evaluated over the whole chain; the stock evaluator
+            // would refuse them. Without `k1` nothing changes.
+            var k1r: K1Result?
+            var stockExtra = extra
+            var k = input.k1
+            k?.actionDigest = dischargeActionDigest(pcactn: pv)
+            // Without `k1` a K1 caveat is refused by evaluateK1 itself (no k1 input), never left to the stock evaluator.
+            let carriesK1 = (leaf["caveats"]?.asArray ?? []).contains(where: { isK1Caveat($0) })
+            if carriesK1 || k?.narrow != nil {
+                let kr = evaluateK1(grant: grant, chain: p["cap_chain"], k1: k, now: now, action: .object(inner))
+                k1r = kr
+                k1Bound = kr.bound
+            }
+            if case let .array(list)? = extra { stockExtra = .array(list.filter { !isK1Caveat($0) } + (k1r?.plain ?? [])) }
+            let r = evaluateAgentCaveats(stockExtra, caveatCtx, actionCtx, toolCall, SafeRegex.Budget())
+            if r.ok && (k1r?.ok ?? true) {
+                checks.set("delegated_caveats", .pass)
+            } else {
+                var why = "delegation caveat(s) not satisfied: \((r.failed + (k1r?.failed ?? [])).joined(separator: ", "))"
+                if let kr = k1r, !kr.ok { why += " (\(kr.reasons.joined(separator: "; ")))" }
+                fail("delegated_caveats", why)
+            }
+        }
+
+        var policyWhy: [String] = []
+        if let e = env {
+            let budget = SafeRegex.Budget() // one document scope for the whole policy step
+            if let why = envelopePredicatesError(e.get("predicates"), actionCtx, budget) { policyWhy.append(why) }
+            let ec = evaluateAgentCaveats(e.get("caveats"), caveatCtx, actionCtx, toolCall, budget)
+            if !ec.ok { policyWhy.append("caveat(s) not satisfied: \(ec.failed.joined(separator: ", "))") }
+            var rootList = rootCaveats(grant)
+            var rootK1: K1Result?
+            // the root's own K1 caveats, judged with the root grant alone (no narrow block: it is bound to the chain's leaf)
+            var rk = input.k1
+            rk?.actionDigest = dischargeActionDigest(pcactn: pv)
+            rk?.narrow = nil
+            if (g["caveats"]?.asArray ?? []).contains(where: { isK1Caveat($0) }) || rk != nil {
+                rootK1 = evaluateK1(grant: grant, chain: nil, k1: rk, now: now, action: .object(inner))
+            }
+            if case let .array(list)? = rootList { rootList = .array(list.filter { !isK1Caveat($0) }) }
+            let rc = evaluateAgentCaveats(rootList, caveatCtx, actionCtx, toolCall, budget)
+            if !rc.ok || !(rootK1?.ok ?? true) {
+                policyWhy.append("root caveat(s) not satisfied: \((rc.failed + (rootK1?.failed ?? [])).joined(separator: ", "))")
+            }
+        } else {
+            policyWhy = ["grant carries no valid envelope"]
+        }
+        if policyWhy.isEmpty {
+            checks.set("policy", .pass)
+        } else {
+            checks.set("policy", .fail)
+            reasons += policyWhy.map { "policy: \($0)" }
+        }
+
+        // ---- 5b. risk score, trust budget and the threshold step-up (the reference's policy VM decision and the F-1 threshold rule)
+        var storedBudget: Risk.Budget?
+        var budgetKey: String?
+        if let hh = chain.last?.get("holder")?.asString, let gg = g["id"]?.asString {
+            budgetKey = stateKey(grantId: gg, leafHolder: hh)
+            if let bs = store as? PCABudgetStore, let k = budgetKey { storedBudget = try? bs.budget(key: k) }
+        }
+        let release = policyWhy.isEmpty && checks["delegated_caveats"] != .fail
+        var riskAfter: Risk.Budget?
+        var riskRan = false
+        do {
+            let rpo = env?.get("risk_policy")?.asObject
+            // the budget: the context's, else the stream's stored one, else a fresh stream is seeded with the grant's bMax
+            var supplied: Risk.Budget? = ctx.budget ?? storedBudget
+            if supplied == nil, input.seedBudget, store is PCABudgetStore, let rp = rpo, let bMax = ToolSchema.fin(rp[JKey("bMax")]) {
+                supplied = Risk.Budget(b: bMax, tau: Double(now), asOf: Double(now))
+            }
+            var riskIn: JObject? = ctx.risk
+            var sourceFailed = false
+            if let src = input.riskSource {
+                do { riskIn = PCA.riskier(riskIn, try src(op, grant, pv)) } catch {
+                    fail("risk", "the risk source failed (fail closed)")
+                    sourceFailed = true
+                }
+            }
+            if !sourceFailed {
+                checks.set("budget", supplied != nil ? .pass : .notEnforced)
+                if !input.requireRiskInputs.isEmpty {
+                    let missingReq = input.requireRiskInputs.filter { k in
+                        !(ToolSchema.fin(riskIn?[JKey(k)]) != nil || (k == "semanticDistance" && planNodes != nil))
+                    }
+                    if !missingReq.isEmpty { fail("risk_inputs", "required risk input(s) not supplied by the server: \(missingReq.joined(separator: ", "))") } else { checks.set("risk_inputs", .pass) }
+                }
+                if let pol = rpo {
+                    func pn(_ k: String) -> Double { ToolSchema.fin(pol[JKey(k)]) ?? .nan }
+                    let th1 = pn("theta1"), th2 = pn("theta2"), kappa = pn("kappa"), lambda = pn("lambda")
+                    let weights: JObject = pol[JKey("weights")]?.asObject ?? [:]
+                    let start = supplied ?? Risk.Budget(b: 0, tau: Double(now), asOf: Double(now))
+                    let leaked = Risk.leak(start, now: Double(now), lambda: lambda)
+                    var inputs = Risk.WORST
+                    var missing: [String] = []
+                    for (i, k) in Risk.KEYS.enumerated() {
+                        if let v = ToolSchema.fin(riskIn?[JKey(k)]) { inputs[i] = v } else if i != 5 { missing.append(k) }
+                    }
+                    if let pl = planNodes, riskIn?[JKey("semanticDistance")] == nil {
+                        if let nid = nodeId?.asString, let goal = pl.last?.get("id")?.asString { inputs[0] = Risk.planGeodesic(pl, from: nid, to: goal) } else { inputs[0] = 1 }
+                        missing.removeAll { $0 == "semanticDistance" }
+                    }
+                    if riskIn?[JKey("age")] == nil { inputs[5] = Risk.ageSinceTouch(leaked, now: Double(now)) }
+                    var why: [String] = []
+                    if !missing.isEmpty { why.append("risk input(s) missing, assumed worst case: \(missing.joined(separator: ", "))") }
+                    var floor = 0.0
+                    switch p["caution"] {
+                    case .some(.int(let n)): floor = min(1, max(0, Double(n)))
+                    case .some(.double(let d)) where d.isFinite: floor = min(1, max(0, d))
+                    default: break
+                    }
+                    let r = max(Risk.riskScore(inputs, weights: weights), floor)
+                    let fast = ["reversible", "rate_limited", "costly"].contains(effective?.asString ?? "")
+                    let rt = Risk.requiredThreshold(r, theta1: th1, theta2: th2, irreversible: !fast)
+                    let adm = Risk.admit(t: Risk.requiredThreshold(r, theta1: th1, theta2: th2).t, covers: leaked.b >= Risk.cost(r, kappa: kappa))
+                    if adm.needStepUp {
+                        why.append(rt.t < 3 && adm.t == 3 ? "trust budget depleted: human recharge required"
+                                   : "risk \(String(format: "%.3f", r)) exceeds auto threshold: step-up to t=\(adm.t)")
+                    }
+                    let thr = Risk.escalate(rt, minT: adm.t)
+                    // explained only when the missing budget decided something (a step-up): the reference authorize always holds a seeded budget, so a
+                    // calm allow on a store that keeps none stays free of the note
+                    if supplied == nil && adm.needStepUp {
+                        reasons.append("budget: no budget supplied \u{2014} fail-closed default (B=0, DENY-METERED): any machine-only (t<3) action must step-up / recharge")
+                    }
+                    for w in why { reasons.append("policy: \(w)") }
+                    let debitIt = release && adm.metered
+                    let out = debitIt ? Risk.debit(leaked, Risk.cost(r, kappa: kappa)) : leaked
+                    // F-1: t above 1 needs an ENFORCED threshold hook that reported having enforced at least the server-derived t
+                    var ho: ThresholdOutcome?
+                    if let hook = input.thresholdHook {
+                        do { ho = try hook(pv) } catch { ho = ThresholdOutcome(enforced: true, ok: false) }
+                    }
+                    let hooked = ho?.enforced ?? false
+                    if thr.t > 1 && release {
+                        if hooked, let h = ho, h.ok {
+                            // the reference's hookTInt: NaN is unreported, +/-Infinity clamp to the safe-integer bound, else floor
+                            let hi: Double? = h.t.flatMap { $0.isNaN ? nil : max(-9007199254740991, min(9007199254740991, $0.rounded(.down))) }
+                            if hi == nil || (hi ?? 0) < Double(thr.t) {
+                                fail("threshold", "threshold hook enforced t=\(h.t.map { PD.numStr($0) } ?? "unreported") but the server requires t=\(thr.t) (below the server-derived threshold; derive t from server-held data)")
+                            } else { checks.set("threshold", .pass) }
+                        } else if hooked {
+                            fail("threshold", "t=\(thr.t) required and the threshold proof was rejected")
+                        } else {
+                            fail("threshold", "t=\(thr.t) (\(thr.proof)) required but no threshold verifier is enforced")
+                        }
+                    } else if hooked, let h = ho { if h.ok { checks.set("threshold", .pass) } else { fail("threshold", h.reason ?? "rejected") } }
+                    // a tightened (adaptive) policy can only NARROW the grant's
+                    if let ap = input.adaptivePolicy, release {
+                        var adaptive: JSONValue?
+                        var apFailed = false
+                        do { adaptive = try ap(now) } catch { apFailed = true; fail("adaptive", "the adaptive policy could not be read (fail closed)") }
+                        if !apFailed, let a = adaptive {
+                            if let bad = validateRiskPolicy(a) { fail("adaptive", "invalid policy (\(bad))") } else {
+                                let ao = a.asObject ?? [:]
+                                let ta = Risk.requiredThreshold(r, theta1: ToolSchema.fin(ao[JKey("theta1")]) ?? .nan, theta2: ToolSchema.fin(ao[JKey("theta2")]) ?? .nan).t
+                                if ta > thr.t { fail("adaptive", "tightened policy requires threshold t=\(ta) (grant policy: t=\(thr.t))") }
+                            }
+                        } else if !apFailed {
+                            fail("adaptive", "the adaptive policy could not be read (fail closed)")
+                        }
+                    }
+                    riskRan = true
+                    riskAfter = supplied == nil ? nil : out
+                }
+            }
+        }
+
+        // ---- required checks (default-deny), then the replay counter
+        // `replay` is decided by the claim below: tentatively pass (as the TypeScript guard does), flipped to fail on a refusal.
+        checks.set("replay", .pass)
+        // the reference's read-side pre-check: a counter at or below the stored one is a replay BEFORE any escalation, answer or undo
+        // window is weighed (a replay is a hard deny, never escalate-class); the atomic claim below still decides admission
+        if let ls = store as? PCALastStore, let h = chain.last?.get("holder")?.asString, let gid = g["id"]?.asString, let counter = p["counter"]?.safeInt,
+           let last = try? ls.last(key: stateKey(grantId: gid, leafHolder: h)), counter <= last {
+            fail("replay", "\(counter) is not greater than last seen \(last) (replay)")
+        }
+        func assuranceReport() -> AssuranceReport {
+            var src = AssuranceSources(pcactn: pv, hooks: input.assuranceHooks)
+            for n in checks.order { src.checks.append(NamedStatus(name: n == "chain" ? "cap_chain" : n, status: checks.map[n]?.rawValue ?? "fail")) }
+            if core.legacyModelPolarity && checks["tighten"] == .pass { src.degraded = ["tighten": PCA.LEGACY_POLARITY_DEGRADED] }
+            return PCA.buildAssuranceReport(src)
+        }
+        if let req = input.requireAssurance, let why = PCA.unmetAssurance(assuranceReport(), req) {
+            checks.set("assurance", .fail)
+            reasons.append(why)
+        }
+        // `counter` in a require list is the documented alias of `replay` (it always meant the stateful check here).
+        let freshnessRequired = (input.revocationStaleness?.isOn ?? false) ? ["freshness"] : []
+        let beaconRequired = input.beacon != nil ? ["beacon"] : []
+        for name in DEFAULT_REQUIRED_CHECKS + freshnessRequired + beaconRequired + input.require.map({ $0 == "counter" ? "replay" : $0 }) {
+            let st = checks[name]
+            if st != .pass && st != .fail {
+                checks.set(name, .fail)
+                reasons.append("\(name): required check is \(st?.rawValue ?? "absent") (default-deny: not enforced by this resource server)")
+            }
+        }
+        // provenance by default: its own check name (`provenance` is rule 17, whose outcome is never overwritten)
+        let pf = provenanceFlowCheck(input, pcactn: pv, grant: grant, op: op, principalPlan: principalPlan, principalControl: principalControl)
+        // a required provenance_flow was refused above: the gate's outcome never lifts that, or the decision reads escalate and an answer allows
+        if pf.status == .fail { fail("provenance_flow", pf.reason ?? "refused") } else if checks["provenance_flow"] != .fail { checks.set("provenance_flow", pf.status) }
+
+        var escalation: JSONValue?
+        var answeredBy: String?
+        var undoAdmission: UndoAdmission?
+        func deny() -> AuthorizeResult {
+            let status = AUTHN_CHECKS.contains(where: { checks[$0] == .fail }) ? 401 : 403
+            var r = AuthorizeResult(allow: false, status: status, checks: checks.map, checkNames: checks.order, reasons: reasons,
+                                    reason: decisive(checks, reasons), operation: nil, pcactn: pv, verdict: core, missing: nil)
+            r.decision = escalation != nil ? "escalate" : "deny"
+            r.escalation = escalation
+            r.assurance = assuranceReport()
+            return r
+        }
+        // a feature the PCActn carries but this verifier does not implement denies unless the host accepts it; before any state is touched
+        if checks["bond"] == .unsupported && !input.allowUnsupported.contains("bond") {
+            reasons.append("bond: unsupported: the PCActn carries a feature this verifier does not implement (list it in allowUnsupported to accept it)")
+            return deny()
+        }
+        let holder = chain.last?.get("holder")?.asString
+        let gidOpt = g["id"]?.asString
+        if checks.anyFail {
+            // Ternary decision: every failing check is escalate-class (over the FULL per-check result set) -> escalate; never
+            // admitted by itself. A hard failure anywhere stays deny, and an answer never upgrades it.
+            var st: [String: String] = [:]
+            for (n, c) in checks.map { st[n] = c.rawValue }
+            guard let h = holder, let gid = gidOpt,
+                  PCA.decisionOf(allow: false, checks: st, reasons: reasons) == "escalate" else { return deny() }
+            var last: Int64?
+            var headKnown = false
+            if let ls = store as? PCALastStore {
+                do {
+                    last = try ls.last(key: stateKey(grantId: gid, leafHolder: h))
+                    headKnown = true
+                } catch {}
+            }
+            let renderDigest: String? = input.escalationRender?(pv)
+            guard let req = PCA.buildEscalationRequest(aud: audience, grant: grant, pcactn: pv, lastCounter: last, reasons: reasons, now: now, renderDigest: renderDigest) else { return deny() }
+            escalation = req
+            // a null answer is no answer; a present one is always judged (no pinned principal is its own refusal reason)
+            let answer = input.escalationAnswer.flatMap { $0.isNull ? nil : $0 }
+            if answer != nil, !input.insecureUnboundApproval, renderDigest == nil {
+                // K7 default: an answer is admitted only over a render the verifier recomputed
+                reasons.append("escalation: an approval render is required and none could be recomputed (set escalationRender, or insecureUnboundApproval)")
+            } else if let ans = answer, headKnown,
+               let pd = PCA.escalationPolicyDigest(grant: grant), let ad = PCA.escalationActionDigest(pcactn: pv), let hh = PCA.escalationHistoryHead(lastCounter: last) {
+                let v = PCA.verifyEscalationAnswer(ans, principals: input.escalationPrincipals,
+                                                   bind: EscalationBinding(policyDigest: pd, actionDigest: ad, historyHead: hh, renderDigest: renderDigest), now: now)
+                if v.ok && v.decision == "allow" {
+                    // the answer upgrades ONLY the escalate-class failures; the replay claim below spends it
+                    for n in checks.order where checks[n] == .fail { checks.set(n, .pass) }
+                    checks.set("escalation", .pass)
+                    reasons.append("escalation: answered allow by principal \(String(v.principal.prefix(8)))")
+                    answeredBy = v.principal
+                    escalation = nil
+                } else {
+                    reasons.append("escalation: \(v.ok ? "the principal answered deny" : v.reason)")
+                }
+            }
+            // Undo window: an unanswered escalation runs now under a veto window instead of waiting for prior approval (only the
+            // escalate-class failures are lifted, exactly what an answer would lift). Never for a provenance escalation:
+            // reversibility does not make an action injected content chose safe to run.
+            let answerPresented = answer != nil
+            if let admit = input.undo, undoEligible(escalated: escalation != nil, answerPresented: answerPresented, checks: checks.map) {
+                if let a = try? admit(UndoAdmitRequest(pcactn: pv, grant: grant, operation: op)), !a.compensationVerb.isEmpty, Obligations.obligationError(a.obligation) == nil {
+                    for n in checks.order where checks[n] == .fail { checks.set(n, .pass) }
+                    checks.set("undo_window", .pass)
+                    reasons.append("undo_window: runs now under a veto window until \(a.windowEnd) (compensation \(a.compensationVerb))")
+                    escalation = nil
+                    undoAdmission = a
+                }
+            }
+            if escalation != nil { return deny() }
+        }
+
+        guard let h = holder, let gid = gidOpt, let counter = p["counter"]?.safeInt else {
+            fail("replay", "no counter stream for this proof (fail closed)")
+            return deny()
+        }
+        // the durable contract commits once the action is otherwise admitted, before the counter is spent (a refusal costs the PCActn nothing)
+        if let ce = input.contracts, let why = contractRefusal(ce.check(contractAction(op), permitted: true)) {
+            fail("contract", String(why.dropFirst("contract: ".count)))
+            return deny()
+        }
+        // the grant that was actually used is judged again: a linked template, and the passport's subject
+        if let lt = input.requireLinkedTemplate {
+            do {
+                if let why = try linkError(grant, lt) {
+                    fail("template", String(why.dropFirst("template: ".count)))
+                    return deny()
+                }
+            } catch {
+                fail("template", "the template registry failed (fail closed)")
+                return deny()
+            }
+        }
+        if input.requirePassport != nil, passportLeaf != holder {
+            fail("passport", "subject_mismatch")
+            return deny()
+        }
+        if let bs = beaconSeq, let ps = store as? PCAPinStore {
+            do { try ps.raisePin(key: gid + ":beacon", value: bs) } catch {
+                fail("beacon", "the beacon pin could not be stored (fail closed)")
+                return deny()
+            }
+        }
+        guard let id = IV.strictHash(pv) else { throw InternalError(what: "the PCActn is outside the strict JSON profile") }
+        let claimed: ClaimResult?
+        do {
+            if riskRan, let bs = store as? PCABudgetStore {
+                claimed = try bs.claim(key: stateKey(grantId: gid, leafHolder: h), counter: counter, budgetBefore: storedBudget, budgetAfter: riskAfter)
+            } else {
+                claimed = try store.claim(key: stateKey(grantId: gid, leafHolder: h), counter: counter)
+            }
+        } catch { claimed = nil }
+        if let c0 = claimed, c0.conflict {
+            fail("replay", "the trust budget changed under this decision (concurrent update): retry")
+            return deny()
+        }
+        guard let c = claimed, c.ok else {
+            if claimed == nil {
+                fail("replay", "the replay store failed (fail closed)")
+            } else if let last = claimed?.lastCounter {
+                fail("replay", "\(counter) is not greater than last seen \(last) (replay)")
+            } else {
+                fail("replay", "\(counter) was already claimed (replay)")
+            }
+            return deny()
+        }
+        // K1 `max_uses` is spent only for an action that is otherwise admitted, after the counter above accepted it
+        if let bound = k1Bound, bound.contains(where: { PCA.k1IsMaxUses($0.caveat) }) {
+            let why: String
+            if let us = input.usesStore {
+                let r = reserveMaxUses(store: us, bound: bound, now: now)
+                why = r.ok ? "" : r.reason
+            } else {
+                why = "the chain carries a max_uses caveat and this guard has no usesStore (fail closed)"
+            }
+            if !why.isEmpty {
+                fail("max_uses", why)
+                return deny()
+            }
+        }
+        // the rollback pin moves only after an ALLOW whose freshness check passed (never on a deny), monotone and atomic in the store
+        if let e = freshEpoch, let ps = store as? PCAPinStore {
+            do { try ps.raisePin(key: "\(p["grant_ref"]?.asString ?? gidOpt ?? ""):epoch", value: e) } catch {
+                fail("freshness", "the revocation epoch pin could not be raised (fail closed)")
+                return deny()
+            }
+        }
+        var ok = AuthorizeResult(allow: true, status: 200, checks: checks.map, checkNames: checks.order, reasons: reasons, reason: nil,
+                                 operation: AuthorizedOperation(verb: op.verb, resource: op.resource, paramsDigest: opDigest, id: id),
+                                 pcactn: pv, verdict: core, missing: nil)
+        ok.decision = "allow"
+        ok.forbidCertificate = forbidCert
+        ok.template = input.requireLinkedTemplate != nil ? "linked" : nil
+        ok.passport = passportVerdict
+        ok.assurance = assuranceReport()
+        if let rp = input.requirePassport, let pvd = passportVerdict { ok.assurance.set("passport", passportAssurance(pvd, rp)) }
+        if core.legacyModelPolarity && checks["tighten"] == .pass { ok.degraded = ["tighten": PCA.LEGACY_POLARITY_DEGRADED] }
+        if let by = answeredBy { ok.escalation = .object(["answered_by": .string(by)]) }
+        if let a = undoAdmission {
+            ok.undo = a
+            ok.obligations = [a.obligation]
+        }
+        return ok
+    }
+
+    /// The undo hook's gate: an escalation is outstanding, no escalation answer was presented, and it is not a provenance escalation
+    /// (`provenance_flow`, or Intent v2 rule 17 `provenance`, failed): reversibility never makes injected content's choice safe to run.
+    static func undoEligible(escalated: Bool, answerPresented: Bool, checks: [String: CheckStatus]) -> Bool {
+        escalated && !answerPresented && checks["provenance_flow"] != .fail && checks["provenance"] != .fail
+    }
+
+    public static let LEGACY_POLARITY_DEGRADED = "model_polarity 'legacy': a grant reads a model-derived value in where (rule 21)"
+
+    /// The grant's envelope carries units / tighten / model_polarity / actions, or a grant-side where reads a model-derived path.
+    static func needsModelRules(_ grant: JSONValue) -> Bool {
+        guard let env = readEnvelope(grant) else { return false }
+        if ["units", "tighten", "model_polarity", "actions"].contains(where: { env.get($0) != nil }) { return true }
+        return !modelPathsRead([env.get("predicates") ?? .null]).isEmpty
+    }
+
+    /// The Merkle root of a known plan (each node's leaf with its own pre / post conditions), or nil when a node is
+    /// malformed.
+    static func knownPlanRoot(_ nodes: [JSONValue]) -> String? {
+        var leaves: [JSONValue] = []
+        for n in nodes {
+            guard case let .object(o) = n, o["verb"] != nil, o["resource"] != nil else { return nil }
+            guard let cond = IV.strictHash(.object(["pre": o["pre"] ?? .null, "post": o["post"] ?? .null])),
+                  let leaf = Merkle.planLeaf(o["id"], o, cond), IV.strictCanon(leaf) != nil else { return nil }
+            leaves.append(leaf)
+        }
+        return Merkle.merkleRoot(leaves)
+    }
+
+    /// The predicate `env`: the host's, with the verifier-computed Intent Layer v2 members.
+    static func v2Env(_ p: JObject, _ grant: JSONValue, _ v2: IntentV2Context?, _ now: Int64, _ env: JSONValue?) -> JSONValue? {
+        if p["intent_session"] == nil { return env }
+        var rest = env?.asObject ?? [:]
+        for k in ["acc", "mon", "canon", "world", "prov", "class"] { rest[JKey(k)] = nil }
+        if case let .object(d)? = IntentV2.decide(p, grant: grant, ctx: v2, now: now).env?.json {
+            for (k, v) in d { rest[k] = v }
+        }
+        return .object(rest)
+    }
+
+    /// True only if `result` allowed exactly this operation (verb, resource, params digest). Call it where the side effect
+    /// runs, with the values it is about to use.
+    public static func isAuthorized(_ result: AuthorizeResult, for operation: Operation?) -> Bool {
+        guard result.allow, let b = result.operation, let op = operation, op.isValid, let d = IV.strictHash(op.params) else { return false }
+        return IV.same(b.verb, op.verb) && IV.same(b.resource, op.resource) && b.paramsDigest == d
+    }
+}
+
+extension JSONValue {
+    /// The canonical JSON text of the value (sorted keys, no whitespace, the numbers as ECMAScript prints them): what the stores keep.
+    public var canonicalText: String { Canonical.canonicalize(self) }
+
+    /// Parse JSON text (RFC 8259) the way `JSON.parse` reads it: for a request body or a grant from your store. nil when
+    /// the text is not JSON. (A presented PCActn goes to `PCA.authorize(json:_:)`, which applies the strict profile.)
+    public static func parse(_ text: String) -> JSONValue? {
+        guard let v = try? StrictJSON.parseLenient(text) else { return nil }
+        return IV.normalized(v)
+    }
+}

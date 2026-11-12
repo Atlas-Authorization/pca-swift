@@ -17,6 +17,8 @@ enum Wire {
         "intent",
         // Intent Layer v2 (additive, SIGNED): the session member (IntentSession.swift, rule 13).
         "intent_session",
+        // Consistency token (additive, SIGNED): the `fresh_at` member (FreshAt.swift).
+        "fresh_at",
     ]
     static let MAX_AUD_LEN = 256
     static let MAX_NONCE_LEN = 128
@@ -144,6 +146,7 @@ enum Wire {
         if let v = p["progress_step"], !v.isObject { return "'progress_step' must be an object" }
         if let v = p["intent"], let e = Intent.validateWire(v) { return e }
         if let v = p["intent_session"], let e = IntentSession.validateWire(v) { return e }
+        if let v = p["fresh_at"], let e = FreshAt.validateWire(v) { return e }
         if let v = p["prohibition_evidence"], !v.isObject && !v.isArray { return "'prohibition_evidence' must be an object or array" }
         if let th = p["threshold"] {
             guard let shares = th.asObject?["shares"]?.asArray else { return "'threshold' must be {shares:[...]}" }

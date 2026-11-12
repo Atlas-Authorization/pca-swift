@@ -1,0 +1,198 @@
+[
+ {
+  "file": "Sources/AtlasPCAVerify/AttestJWS.swift",
+  "lineno": 392,
+  "text": "pos += 1 // [",
+  "mutant": "1->0 => pos += 0 // [",
+  "reason": "V8JSON.array() is entered only from value() when peek() == '['. The unmutated line advances pos past the '[' before the element loop; the mutant leaves pos on the '[', so the loop's first value() call sees '[' again, dispatches to array() again, and so on without any consumed input or any base case: unbounded mutual recursion value() -> array() -> value(), which overflows the stack (signal 11) for every input that contains an array, regardless of what follows. A deadline cannot help (a stack overflow is a crash, not a hang) and no distinguishing assertion can run first because the very first array reached by any test crashes the process. The unmutated code passes the same tests (it consumes the '[' and recurses only on the nested, strictly shorter remaining input)."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Issue.swift",
+  "lineno": 99,
+  "text": "if hs.count == 1 { return }",
+  "mutant": "1->0 => if hs.count == 0 { return }",
+  "reason": "Plan.prove is the recursion base case: it must stop at a single-leaf slice. Every proof descent ends at a slice of count 1 (Merkle.split(n) is the largest power of two below n, so each recursive half shrinks until it has exactly one element). With the mutant the test is `count == 0`, never true here, so at count 1 the code computes k = Merkle.split(1) = 1 (IntentMap.split starts k = 1 and 1*2 < 1 is false), takes the `idx < k` branch for idx 0 and calls prove(Array(hs[..<1]), 0): the identical one-element slice with the identical index, which recurses without end and overflows the stack (signal 11). This happens for every proofFor call on any plan (a one-node plan hits it at once, a larger plan on its first leaf descent), so no assertion can run before the crash and a deadline cannot catch a crash. The unmutated code returns at count 1 and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/IntentMap.swift",
+  "lineno": 51,
+  "text": "if hs.count == 1 { return hs.first! }",
+  "mutant": "1->0 => if hs.count == 0 { return hs.first! }",
+  "reason": "Mutated line is `if hs.count == 0 { return hs.first! }` in treeRoot. Every non-empty input is split down (split(n) < n for n >= 2) to a one-element slice; for count 1 the mutant is false, split(1) = 1, and treeRoot(hs.prefix(1)) recurses on the same one-element slice with no change, so recursion never ends (stack overflow, signal 11). The result is only returned after the recursion, so no assertion can run first; the unmutated code returns hs.first! at count 1 and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/IntentMap.swift",
+  "lineno": 284,
+  "text": "hs.append(h)",
+  "mutant": "drop-stmt => /* dropped */",
+  "reason": "Dropping hs.append(h) leaves hs empty on every successful commit(leaves:) call (a non-empty leaf list whose entries all validate). commitOf(Int64(hs.count), treeRoot(hs[...])) then calls treeRoot on an empty slice: count 0 != 1, split(0) = 1, hs.prefix(1) is the same empty slice, so recursion never ends (stack overflow, signal 11). Malformed-leaf inputs return nil before this line in both versions. No assertion can run before the crash; the unmutated code appends each hash and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Workflow.swift",
+  "lineno": 183,
+  "text": "if state[id] == 1 { return false }",
+  "mutant": "1->2 => if state[id] == 2 { return false }",
+  "reason": "Each mutant removes the on-stack marker (state 1) test or sets the wrong marker, so a node already being visited is never recognised. For any cyclic dependency input (a<->b, or a self-dependency, which the ancestors tests use) visit(a) calls visit(b) calls visit(a) again and the recursion never ends (stack overflow, signal 11). Acyclic inputs never revisit an in-progress node, so they are unaffected. Nothing can be asserted before the crash; the unmutated code returns false at the second visit and ancestors() returns nil."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Workflow.swift",
+  "lineno": 183,
+  "text": "if state[id] == 1 { return false }",
+  "mutant": "1->0 => if state[id] == 0 { return false }",
+  "reason": "Each mutant removes the on-stack marker (state 1) test or sets the wrong marker, so a node already being visited is never recognised. For any cyclic dependency input (a<->b, or a self-dependency, which the ancestors tests use) visit(a) calls visit(b) calls visit(a) again and the recursion never ends (stack overflow, signal 11). Acyclic inputs never revisit an in-progress node, so they are unaffected. Nothing can be asserted before the crash; the unmutated code returns false at the second visit and ancestors() returns nil."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Workflow.swift",
+  "lineno": 184,
+  "text": "state[id] = 1",
+  "mutant": "1->0 => state[id] = 0",
+  "reason": "Each mutant removes the on-stack marker (state 1) test or sets the wrong marker, so a node already being visited is never recognised. For any cyclic dependency input (a<->b, or a self-dependency, which the ancestors tests use) visit(a) calls visit(b) calls visit(a) again and the recursion never ends (stack overflow, signal 11). Acyclic inputs never revisit an in-progress node, so they are unaffected. Nothing can be asserted before the crash; the unmutated code returns false at the second visit and ancestors() returns nil."
+ },
+ {
+  "file": "Sources/AtlasPCASQLite/SQLiteDatabase.swift",
+  "lineno": 9,
+  "text": "private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)",
+  "mutant": "1->2 => private let SQLITE_TRANSIENT = unsafeBitCast(-2, to: sqlite3_destructor_type.self)",
+  "reason": "SQLITE_TRANSIENT is the sentinel -1 meaning 'SQLite copies the text'. With -2 sqlite3_bind_text treats the pointer value 0xFFFF...FE as a destructor function and calls it when the bound text is released at finalize, a jump to an invalid address (signal 11). Every .text bind (all store tests bind text and finalize in the same call) hits it, and the crash occurs inside run/query before any result is returned, so no assertion can precede it. The unmutated code passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Actions.swift",
+  "lineno": 466,
+  "text": "visiting.insert(id)",
+  "mutant": "drop-stmt => /* dropped */",
+  "reason": "Dropping visiting.insert(id) means a trait on the walk stack is never recognised by the visiting.contains check. For any registry with an implies cycle (a implies b implies a, or a implies a, which the registry error tests use) walk(a) calls walk(b) calls walk(a) with depth[a] still unset, so the recursion never ends (stack overflow, signal 11). Acyclic registries never revisit an in-progress trait. No assertion can run first; the unmutated code returns -1 and registryError reports 'implies cycle'."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Strict.swift",
+  "lineno": 22,
+  "text": "static let P: BigUInt = (BigUInt(1) << 255) - BigUInt(19)",
+  "mutant": "1->0 => static let P: BigUInt = (BigUInt(0) << 255) - BigUInt(19)",
+  "reason": "The static initialiser becomes (BigUInt(0) << 255) - BigUInt(19), i.e. 0 - 19. BigUInt.- has precondition(!(a < b), 'BigUInt subtraction underflow') (BigUInt.swift:96), which traps (signal 4) at the first access of Ed25519Strict.P, on every use of the type; there is no input for which it does not trap. The unmutated code computes 2^255 - 19 and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Merkle.swift",
+  "lineno": 29,
+  "text": "if hs.count == 1 { return hs[0] }",
+  "mutant": "1->0 => if hs.count == 0 { return hs[0] }",
+  "reason": "Merkle.build recurses on hs[..<k] and hs[k...] with k = split(count) >= 1, so every call chain on a non-empty list ends at a one-element list. The only base case is the mutated test; with 'count == 0' a one-element list is never a base case (build is not called with [] because merkleRoot returns nil first, and k < count for count >= 2), so build([x]) computes k = split(1) = 1 and calls build(hs[..<1]) = build([x]) again: unbounded recursion, stack overflow (signal 11) on every non-empty input, including the 2-leaf and larger trees every test uses. No input yields a result, so no assertion can run before the crash; the unmutated code returns hs[0] at the base and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/BigUInt.swift",
+  "lineno": 43,
+  "text": "acc = acc * ten + BigUInt(d)",
+  "mutant": "+->- => acc = acc * ten - BigUInt(d)",
+  "reason": "init(decimal:) starts with acc = 0, so the first digit d computes 0*10 - d = 0 - d. For d > 0 that is a < b in BigUInt.-, whose precondition(!(a < b)) traps (signal 4). Only a string of '0' characters avoids the trap, and there every step is 0 - 0 = 0 which equals the unmutated result (acc stays 0). Every string with a non-zero digit (the curve constants the tests use, and any other input) therefore traps on its first non-zero digit, before any value can be compared; the unmutated code adds the digit and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/BigUInt.swift",
+  "lineno": 96,
+  "text": "precondition(!(a < b), \"BigUInt subtraction underflow\")",
+  "mutant": "<-><= => precondition(!(a <= b), \"BigUInt subtraction underflow\")",
+  "reason": "The mutated precondition fails exactly when a <= b. For a > b it holds and the result is identical to the original; for a < b both traps; for a == b the original passes and returns zero (the reduction and comparison steps of the Ed25519 strict checks subtract equal values, e.g. x - x), while the mutant traps (signal 4). The only distinguishing input is a == b, and the mutant's behaviour there is an uncatchable trap, so no assertion can observe it; the unmutated code passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/BigUInt.swift",
+  "lineno": 96,
+  "text": "precondition(!(a < b), \"BigUInt subtraction underflow\")",
+  "mutant": "drop-! => precondition((a < b), \"BigUInt subtraction underflow\")",
+  "reason": "The mutated precondition holds only when a < b, which is the underflow case, and fails for every valid subtraction (a >= b). Each call of BigUInt.- with a valid operand pair traps (signal 4) before returning, so no subtraction result is ever observable and no assertion can run after one; the unmutated code accepts a >= b and passes the same tests."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Keys.swift",
+  "lineno": 106,
+  "text": "let pkLen = Int(atlas_mldsa_len(lv, 0)), skLen = Int(atlas_mldsa_len(lv, 1)), sigBytes = Int(atlas_mldsa_len(lv, 2))",
+  "mutant": "1->2 => let pkLen = Int(atlas_mldsa_len(lv, 0)), skLen = Int(atlas_mldsa_len(lv, 2)), sigBytes = Int(atlas_mldsa_len(lv, 2))",
+  "reason": "The mutated line sizes the secret-key buffer with atlas_mldsa_len(lv, 2) or (lv, 0), the signature length (3309 for ML-DSA-65) or public-key length (1952), instead of the secret-key length (4032). make() then hands that undersized buffer to atlas_mldsa_keygen, which writes the full secret key into it: a heap overflow on every call of make on this backend, for every level and seed, before any value can be returned or asserted. The unmutated line allocates exactly the length liboqs reports for the secret key."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Keys.swift",
+  "lineno": 106,
+  "text": "let pkLen = Int(atlas_mldsa_len(lv, 0)), skLen = Int(atlas_mldsa_len(lv, 1)), sigBytes = Int(atlas_mldsa_len(lv, 2))",
+  "mutant": "1->0 => let pkLen = Int(atlas_mldsa_len(lv, 0)), skLen = Int(atlas_mldsa_len(lv, 0)), sigBytes = Int(atlas_mldsa_len(lv, 2))",
+  "reason": "The mutated line sizes the secret-key buffer with atlas_mldsa_len(lv, 2) or (lv, 0), the signature length (3309 for ML-DSA-65) or public-key length (1952), instead of the secret-key length (4032). make() then hands that undersized buffer to atlas_mldsa_keygen, which writes the full secret key into it: a heap overflow on every call of make on this backend, for every level and seed, before any value can be returned or asserted. The unmutated line allocates exactly the length liboqs reports for the secret key."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 71,
+  "text": "var r = [UInt64](repeating: 0, count: 8)",
+  "mutant": "8->7 => var r = [UInt64](repeating: 0, count: 7)",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), r has 7 elements instead of 8, so the write r[i + 4] = carry on the last outer turn (i = 3) indexes r[7], out of range, and reduceWide later reads r[7] too, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 73,
+  "text": "for i in 0..<4 {",
+  "mutant": "4->5 => for i in 0..<5 {",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), the outer loop runs i = 4 as well; its inner loop touches r[4..7] and then r[i + 4] = r[8], out of range, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 77,
+  "text": "let (s1, o1) = lo.addingReportingOverflow(r[i + j])",
+  "mutant": "+->- => let (s1, o1) = lo.addingReportingOverflow(r[i - j])",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), the first inner turn with j = 1 (i = 0) reads r[i - j] = r[-1], out of range, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 79,
+  "text": "r[i + j] = s2",
+  "mutant": "+->- => r[i - j] = s2",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), the first inner turn with j = 1 (i = 0) writes r[i - j] = r[-1], out of range, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 82,
+  "text": "r[i + 4] = carry",
+  "mutant": "+->- => r[i - 4] = carry",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), the first outer turn (i = 0) writes r[i - 4] = r[-4], out of range, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Ed25519Torsion.swift",
+  "lineno": 82,
+  "text": "r[i + 4] = carry",
+  "mutant": "4->5 => r[i + 5] = carry",
+  "reason": "In fmul (the 4x4 limb product into the 8-limb buffer r), the last outer turn (i = 3) writes r[i + 5] = r[8], out of range, a bounds trap in the debug test build. Every call of fmul runs those turns regardless of its operands, and every Ed25519Torsion operation (add, finv, isPrimeOrder) calls fmul, so the mutant traps on the first fmul call of any test that reaches it and returns no value an assertion could compare. The original keeps every index within 0..7."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 20,
+  "text": "let b1 = i + 1 < bytes.count ? UInt32(bytes[i + 1]) : 0",
+  "mutant": "+->- => let b1 = i + 1 < bytes.count ? UInt32(bytes[i - 1]) : 0",
+  "reason": "Mutant reads bytes[i - 1] whenever i + 1 < bytes.count. At i = 0 that index is -1, so encode traps (Fatal error: Index out of range) on the first group of any input of 2 or more bytes, including every 32-byte digest and key encoding. Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 20,
+  "text": "let b1 = i + 1 < bytes.count ? UInt32(bytes[i + 1]) : 0",
+  "mutant": "1->2 => let b1 = i + 1 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "reason": "Mutant reads bytes[i + 2] under the guard i + 1 < bytes.count. For an input of length 3k+2 (every 32-byte digest or key is one) the last group has i + 1 < count but i + 2 == count, so the read is one past the end and encode traps (Index out of range). Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 21,
+  "text": "let b2 = i + 2 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "mutant": "<-><= => let b2 = i + 2 <= bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "reason": "Mutant guards bytes[i + 2] with i + 2 <= bytes.count. For a length 3k+2 input the last group has i + 2 == count, the guard passes, and the read is one past the end: encode traps (Index out of range) on every 32-byte digest or key encoding. Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 21,
+  "text": "let b2 = i + 2 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "mutant": "+->- => let b2 = i - 2 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "reason": "Mutant guards bytes[i + 2] with i - 2 < bytes.count, true for every i, so a final group of fewer than 3 bytes (any length not a multiple of 3, e.g. 32 bytes) reads past the end and encode traps (Index out of range). Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 21,
+  "text": "let b2 = i + 2 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "mutant": "+->- => let b2 = i + 2 < bytes.count ? UInt32(bytes[i - 2]) : 0",
+  "reason": "Mutant reads bytes[i - 2] under the guard i + 2 < bytes.count. At i = 0 with 3 or more bytes the index is -2, so encode traps (Index out of range) on the first group of any input of 3 or more bytes. Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Base64URLStrict.swift",
+  "lineno": 21,
+  "text": "let b2 = i + 2 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "mutant": "2->1 => let b2 = i + 1 < bytes.count ? UInt32(bytes[i + 2]) : 0",
+  "reason": "Mutant guards bytes[i + 2] with i + 1 < bytes.count. For a length 3k+2 input the last group passes the guard but i + 2 == count, one past the end: encode traps (Index out of range) on every 32-byte digest or key encoding. Deterministic for every input of the shapes named; the unmutated encode indexes only inside the buffer and passes the same tests. The test binary crashed before any test ran (listing), so no assertion could decide it."
+ }
+]

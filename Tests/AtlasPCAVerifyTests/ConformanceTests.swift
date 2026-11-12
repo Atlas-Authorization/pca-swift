@@ -212,7 +212,7 @@ final class ConformanceTests: XCTestCase {
             if let suite = Self.unsupportedSuite(v), !Self.terminalWireFalse(wantChecks) {
                 skippedBySuite[suite, default: 0] += 1
                 if let obj = v.get("pcactn"), !Self.hasSentinel(obj) {
-                    let ug = PCA.verify(pcactn: obj, grant: v.get("grant") ?? .null, now: now, audience: aud)
+                    let ug = PCA.verify(pcactn: obj, grant: v.get("grant") ?? .null, now: now, audience: aud, insecureSkipPlanRootCheck: true)
                     if ug.allow || !ug.reason.contains(PCASuites.unsupportedSuiteReason) {
                         failures.append("\(name): suite \(suite) is not supported here: want an unsupported_suite refusal (\(ug.reason))")
                     }
@@ -233,11 +233,11 @@ final class ConformanceTests: XCTestCase {
 
             let got: PCA.Verdict
             if let raw = v.get("pcactn_json")?.asString {
-                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2)
+                got = PCA.verify(json: raw, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2, insecureSkipPlanRootCheck: true)
             } else if let obj = v.get("pcactn"), Self.hasSentinel(obj) {
                 got = PCA.Verdict(allow: false, checks: ["wire": false], reason: "wire: lone surrogate")
             } else {
-                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2)
+                got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, allowedSuites: allowed, intentPolicy: intentPolicy, intentV2: intentV2, insecureSkipPlanRootCheck: true)
             }
 
             // Intent Layer v2 suite capability: a vector that needs a suite this verifier lacks must FAIL closed with
@@ -646,9 +646,9 @@ final class ConformanceTests: XCTestCase {
             } ?? .null
             let got: PCA.Verdict
             if let rawJson = doc.get("pcactn_json")?.asString {
-                got = PCA.verify(json: rawJson, grant: grant, now: now, audience: aud)
+                got = PCA.verify(json: rawJson, grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true)
             } else {
-                got = PCA.verify(pcactn: doc.get("pcactn") ?? .null, grant: grant, now: now, audience: aud)
+                got = PCA.verify(pcactn: doc.get("pcactn") ?? .null, grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true)
             }
             if got.allow != wantAllow {
                 failures.append("\(file): allow = \(got.allow), want \(wantAllow) (\(got.reason))")
@@ -723,7 +723,7 @@ final class ConformanceTests: XCTestCase {
                 let text = input.get("text")?.asString ?? ""
                 let now = input.get("now")?.safeInt ?? 0
                 let aud = input.get("aud")?.asString ?? ""
-                if PCA.verify(json: text, grant: input.get("grant") ?? .null, now: now, audience: aud).allow {
+                if PCA.verify(json: text, grant: input.get("grant") ?? .null, now: now, audience: aud, insecureSkipPlanRootCheck: true).allow {
                     failures.append("\(name): allowed")
                 }
             default:
@@ -767,7 +767,7 @@ final class ConformanceTests: XCTestCase {
                 got = Threshold.verifyShare(input)
             case "pcactn_json":
                 got = PCA.verify(json: input.get("text")?.asString ?? "", grant: input.get("grant") ?? .null,
-                                 now: input.get("now")?.safeInt ?? 0, audience: input.get("aud")?.asString ?? "").allow
+                                 now: input.get("now")?.safeInt ?? 0, audience: input.get("aud")?.asString ?? "", insecureSkipPlanRootCheck: true).allow
             default:
                 failures.append("\(name): unknown api"); continue
             }

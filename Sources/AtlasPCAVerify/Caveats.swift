@@ -21,8 +21,8 @@ extension PCA {
         guard let cs = csv.asArray else { return csv }
         var out = cs
         if let i = cs.firstIndex(where: { sameString($0.asObject?[JKey("type")], ENVELOPE_CAVEAT) }) { out.remove(at: i) }
-        if let leaf = chain?.asArray?.last, let lc = leaf.asObject?[JKey("caveats")]?.asArray, lc.count > cs.count {
-            out += lc[cs.count...]
+        if let leaf = chain?.asArray?.last, let lc = leaf.asObject?[JKey("caveats")]?.asArray {
+            out += lc.dropFirst(cs.count)
         }
         return .array(out)
     }

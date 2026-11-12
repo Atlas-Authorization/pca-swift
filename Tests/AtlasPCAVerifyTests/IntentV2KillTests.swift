@@ -7,7 +7,7 @@ import Foundation
 /// every boundary pinned on both sides, the reporting conditions, the check order and the independence of checks 1-4.
 final class IntentV2KillTests: XCTestCase {
     typealias F = V2F
-    static let CORE = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter"]
+    static let CORE = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format"]
     static let V2 = ["schema", "intent_session", "accumulators"]
 
     func failing(_ v: PCA.Verdict) -> Set<String> { Set(v.checks.filter { !$0.value }.map { $0.key }) }
@@ -1026,11 +1026,11 @@ final class IntentV2KillTests: XCTestCase {
         XCTAssertFalse(IntentRevocation.check(.object(["epoch": pq, "revoked": .array([])]), session: F.SESSION, authority: F.pub(F.revAuthority), ids: [id],
                                               now: Double(F.NOW), maxAgeMs: 60_000).0)
         // reserved schema parameter names and a null default
-        XCTAssertNotNil(ActionSchema.paramDeclError("action.params.constructor", .object(["type": .string("string"), "semantic": .string("s"), "sensitivity": .string("free")]), nil))
+        XCTAssertNotNil(ActionSchema.paramDeclError("action.params.constructor", .object(["type": .string("string"), "semantic": .string("s"), "sensitivity": .string("free")]), nil, v2: false))
         XCTAssertNotNil(ActionSchema.paramDeclError("action.params.x", .object(["type": .string("string"), "semantic": .string("s"), "sensitivity": .string("free"),
-                                                                                "default": .null]), nil))
+                                                                                "default": .null]), nil, v2: false))
         XCTAssertNil(ActionSchema.paramDeclError("action.params.x", .object(["type": .string("string"), "semantic": .string("s"), "sensitivity": .string("free"),
-                                                                             "default": .string("d")]), nil))
+                                                                             "default": .string("d")]), nil, v2: false))
         // a schema key pq_pk must be a string when present; keys must be an array
         XCTAssertFalse(ActionSchema.verify(F.SCHEMA, keys: .array([F.with(F.KEYS.asArray![0], ["pq_pk": .null])])).ok)
         XCTAssertFalse(ActionSchema.verify(F.SCHEMA, keys: .null).ok)

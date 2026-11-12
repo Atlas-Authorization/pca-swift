@@ -183,6 +183,23 @@ enum Capability {
                 }
             }
         }
+        return allocationsMonotoneError(chain[chain.count - 1].get("caveats"))
+    }
+
+    /// Carried budget allocations are non-increasing in delegation order (the leaf holds the full append-only list): a child can only allocate <= its parent.
+    static func allocationsMonotoneError(_ caveats: [JSONValue]) -> String? { allocationsMonotoneError(JSONValue.array(caveats)) }
+
+    /// TS `allocationsMonotone`: a `caveats` value that is not an array is `malformed caveats` (it was read as the empty list before).
+    static func allocationsMonotoneError(_ caveatsValue: JSONValue?) -> String? {
+        guard case let .array(caveats)? = caveatsValue else { return "malformed caveats" }
+        var prev = Double.infinity
+        for (i, cv) in caveats.enumerated() where IV.same(cv.get("type")?.asString, "budget_alloc") {
+            guard let lim = IV.num(cv.get("limit")), lim.isFinite, lim >= 0 else { return "budget_alloc caveat \(i): limit must be a finite number >= 0" }
+            if lim > prev {
+                return "budget_alloc caveat \(i): allocation \(Canonical.numberString(lim)) widens the parent's carried allocation \(Canonical.numberString(prev)) (monotone: a child can only allocate <= its parent)"
+            }
+            prev = lim
+        }
         return nil
     }
 }

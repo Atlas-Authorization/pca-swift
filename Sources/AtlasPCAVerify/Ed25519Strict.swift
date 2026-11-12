@@ -66,11 +66,13 @@ enum Ed25519Strict {
     static func verify(publicKey pk: [UInt8], message msg: [UInt8], signature sig: [UInt8]) -> Bool {
         guard pk.count == 32, sig.count == 64 else { return false }
         if !isCanonicalS(sig) { return false }              // non-canonical S (S >= L)
+        // Cheap platform equation first (a forged signature costs microseconds); the torsion checks (a full [L]P each) only on success.
+        guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(pk)),
+              key.isValidSignature(Data(sig), for: Data(msg)) else { return false }
         if !isStrictPoint(pk) { return false }            // small-order / non-canonical key
         if !Ed25519Torsion.isPrimeOrder(pk) { return false } // mixed-order key (A + T): CryptoKit's cofactorless check would accept it when k = 0 mod 8
         if !isStrictPoint(Array(sig[0..<32])) { return false } // same for R
-        guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(pk)) else { return false }
-        return key.isValidSignature(Data(sig), for: Data(msg))
+        return true
     }
 
     /// Verify a base64url public key over `msg` against a base64url signature (both strict, fixed length).
