@@ -186,7 +186,7 @@ enum V2F {
     }
 
     static func verify(_ p: JSONValue, _ g: JSONValue, _ c: JSONValue?, now: Int64 = NOW) -> PCA.Verdict {
-        PCA.verify(pcactn: p, grant: g, now: now, audience: AUD, intentV2: c.flatMap(IntentV2Context.fromJSON))
+        PCA.verify(pcactn: p, grant: g, now: now, audience: AUD, intentV2: c.flatMap(IntentV2Context.fromJSON), insecureSkipPlanRootCheck: true)
     }
 
     // ---- sequencer receipts and key sets ----

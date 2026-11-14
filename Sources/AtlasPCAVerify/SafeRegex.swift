@@ -514,12 +514,15 @@ enum SafeRegex {
         var evaluations = 0
         var chars = 0
         var steps = 0
+        /// Evaluations refused so far (a veto must treat a refusal as "could not decide").
+        var refusals = 0
         func charge(srcUnits: Int, progLen: Int, subjectUnits: Int) -> Bool {
             let ev = evaluations + 1
             let ch = chars + srcUnits
             let st = steps + progLen * (subjectUnits + 1)
             if ev > MAX_REGEX_EVALUATIONS_PER_DOCUMENT || ch > MAX_REGEX_SOURCE_CHARS_PER_DOCUMENT || st > MAX_REGEX_STEPS_PER_DOCUMENT {
                 evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 1
+                refusals += 1
                 return false
             }
             evaluations = ev

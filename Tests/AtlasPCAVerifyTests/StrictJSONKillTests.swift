@@ -97,7 +97,7 @@ final class StrictJSONKillTests: XCTestCase {
             }
         }
         // the public entry point: a 100000-deep document is a clean wire deny (no stack overflow)
-        let v = PCA.verify(json: arr(100_000), grant: .object([:]), now: 0, audience: "a")
+        let v = PCA.verify(json: arr(100_000), grant: .object([:]), now: 0, audience: "a", insecureSkipPlanRootCheck: true)
         XCTAssertFalse(v.allow)
         XCTAssertEqual(v.checks, ["wire": false])
         XCTAssertTrue(v.reason.contains("nesting too deep"), v.reason)

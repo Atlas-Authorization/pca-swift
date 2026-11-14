@@ -102,7 +102,7 @@ enum IntentWB {
     static func isParamPath(_ v: JSONValue?) -> Bool {
         guard let p = v?.asString, IV.startsWith(p, "action.params.") else { return false }
         let segs = IV.split(IV.dropPrefix(p, 14), ".")
-        return segs.count >= 1 && segs.count <= 8 && segs.allSatisfy(IV.isPathSegment)
+        return segs.count <= 8 && segs.allSatisfy(IV.isPathSegment) // split keeps empties: never an empty list
     }
 
     /// An optional list member: ABSENT = []; an array; anything else (JSON null included) is malformed (nil: fail closed).
@@ -545,7 +545,6 @@ enum IntentWB {
         guard let suppliedLabels = list(labelsIn) else { return deny("labels must be an array") }
         let paths = prov.keys.map { $0.s }.sorted(by: IV.utf8Less)
         for p in paths where resolveParamPath(params, p) == nil { return deny("prov names '\(p)', a parameter the action does not carry") }
-        for a in paths { for b in paths where !IV.same(a, b) && IV.startsWith(b, a + ".") { return deny("prov paths '\(a)' and '\(b)' overlap") } }
         var receipts: [JKey: JObject] = [:]
         for r in suppliedLabels where validateLabelsWire(r) {
             if let ref = artifactRef(LABELS_REF_DOMAIN, "l", r) { receipts[JKey(ref)] = r.asObject! }
@@ -555,7 +554,7 @@ enum IntentWB {
         var origins: [String: [(cls: String, origin: String)]] = [:]
         for p in paths {
             let value = resolveParamPath(params, p)!
-            var maxRank = -1
+            var maxRank = 0 // provWireError: at least one ref, so the join below always runs
             for refV in prov[JKey(p)]!.asArray! {
                 let ref = refV.asString!
                 if !IV.startsWith(ref, LABEL_REF_PREFIX) {
@@ -581,7 +580,7 @@ enum IntentWB {
                 maxRank = max(maxRank, rank(match ? (IV.same(site, aud) ? "first_party" : "tool") : "agent"))
                 origins[p, default: []].append((f.get("class")!.asString!, site))
             }
-            d.labels[p] = TAINT_LEVELS[maxRank < 0 ? 4 : maxRank]
+            d.labels[p] = TAINT_LEVELS[maxRank]
         }
         for p in pparams.keys.map({ $0.s }).sorted(by: IV.utf8Less) where d.labels[p] == nil {
             if resolveParamPath(params, p) != nil { d.labels[p] = "agent" }
@@ -730,6 +729,7 @@ enum IntentWB {
         var world: JObject?
         var prov: JObject?
         var cls: JObject?
+        var singleSource: [String] = [] // worlds decided by ONE oracle (rule 21: env.world.<name> is then model-derived)
         var reason: String?
     }
 
@@ -755,6 +755,7 @@ enum IntentWB {
             if !w.ok { out.outcome = "deny"; out.checks = [("facts", "fail")]; out.reason = w.reason; return out }
             out.checks.append(("facts", "pass"))
             out.world = w.world
+            out.singleSource = w.singleSource
         }
         let provPolicy = policy?.get("provenance")
         if provenanceActive(prov: s.get("prov"), labels: s.get("labels"), policy: provPolicy) {

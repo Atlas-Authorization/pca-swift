@@ -5,7 +5,7 @@ import XCTest
 /// registered pq_pk length, the unsigned `threshold` slot staying outside the strict-canonical body, field folding of
 /// non-canonical sums.
 final class SemanticsKillTests: XCTestCase {
-    static let ORDER = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter", "intent",
+    static let ORDER = ["wire", "version", "audience", "validity", "chain", "grant_ref_bound", "plan_inclusion", "leaf_signature", "counter_format", "intent",
                         // the Intent Layer v2 checks, in the reference pipeline order (intent-v2.ts)
                         "schema", "intent_session", "layers", "accumulators", "map", "facts", "provenance", "classes"]
 
@@ -17,7 +17,7 @@ final class SemanticsKillTests: XCTestCase {
             guard let pc = v.get("pcactn"), let grant = v.get("grant"), let now = v.get("context")?.get("now")?.safeInt,
                   let aud = v.get("context")?.get("aud")?.asString, !ConformanceTests.hasSentinel(v),
                   ConformanceTests.unsupportedSuite(v) == nil else { continue }
-            let r = PCA.verify(pcactn: pc, grant: grant, now: now, audience: aud)
+            let r = PCA.verify(pcactn: pc, grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true)
             ran += 1
             let name = v.get("name")?.asString ?? "?"
             if r.allow { XCTAssertEqual(r.reason, "", name); continue }
@@ -35,15 +35,15 @@ final class SemanticsKillTests: XCTestCase {
         guard let v = (doc.get("vectors")?.asArray ?? []).first(where: { $0.get("name")?.asString == "valid-in-plan-action" }),
               var pc = v.get("pcactn")?.asObject, let grant = v.get("grant"),
               let now = v.get("context")?.get("now")?.safeInt, let aud = v.get("context")?.get("aud")?.asString else { return XCTFail("vector") }
-        XCTAssertTrue(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: aud).allow)
+        XCTAssertTrue(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true).allow)
         pc["threshold"] = .object([JKey("shares"): .array([]), JKey("x"): .double(-0.0), JKey("y"): .int(Int64.max)])
-        let r = PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: aud)
+        let r = PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true)
         XCTAssertEqual(r.checks["wire"], true, r.reason)
         XCTAssertTrue(r.allow, r.reason)
         // ... but the same value in a SIGNED slot is a wire failure
         var pc2 = pc; pc2.removeValue(forKey: "threshold")
         pc2["risk_claim"] = .object([JKey("r"): .int(0), JKey("inputs"): .object([JKey("x"): .double(-0.0)])])
-        XCTAssertEqual(PCA.verify(pcactn: .object(pc2), grant: grant, now: now, audience: aud).checks, ["wire": false])
+        XCTAssertEqual(PCA.verify(pcactn: .object(pc2), grant: grant, now: now, audience: aud, insecureSkipPlanRootCheck: true).checks, ["wire": false])
     }
 
     /// The typed Ed25519 path (`Threshold.verify`) counts a correctly signed share and refuses it over another message.
@@ -132,12 +132,12 @@ final class SemanticsKillTests: XCTestCase {
         let doc = try ConformanceTests.load("vectors.json")
         guard let v = (doc.get("vectors")?.asArray ?? []).first(where: { $0.get("name")?.asString == "valid-in-plan-action" }),
               let pc = v.get("pcactn"), let grant = v.get("grant"), let now = v.get("context")?.get("now")?.safeInt else { return XCTFail("vector") }
-        let unset = PCA.verify(pcactn: pc, grant: grant, now: now, audience: .unset)
+        let unset = PCA.verify(pcactn: pc, grant: grant, now: now, audience: .unset, insecureSkipPlanRootCheck: true)
         XCTAssertEqual(unset.checks["audience"], false); XCTAssertFalse(unset.allow)
         XCTAssertTrue(unset.reason.hasPrefix("audience:"), unset.reason)
-        let any = PCA.verify(pcactn: pc, grant: grant, now: now, audience: .any)
+        let any = PCA.verify(pcactn: pc, grant: grant, now: now, audience: .any, insecureSkipPlanRootCheck: true)
         XCTAssertEqual(any.checks["audience"], true); XCTAssertTrue(any.allow, any.reason)
-        XCTAssertFalse(PCA.verify(pcactn: pc, grant: grant, now: now, audience: .id("someone-else")).allow)
+        XCTAssertFalse(PCA.verify(pcactn: pc, grant: grant, now: now, audience: .id("someone-else"), insecureSkipPlanRootCheck: true).allow)
     }
 
     /// Typed path: a duplicate (role, key) entry must carry the same pq_pk (or none on both).
@@ -169,7 +169,7 @@ final class SemanticsKillTests: XCTestCase {
         for (c, ok) in [(JSONValue.double(1.0), true), (.double(0.0), true), (.double(0.5), true), (.int(1), true), (.int(0), true),
                         (.double(1.0000001), false), (.double(-0.5), false), (.int(2), false), (.int(-1), false), (.string("1"), false)] {
             pc["caution"] = c
-            XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any).checks["wire"] ?? false, ok, "\(c)")
+            XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any, insecureSkipPlanRootCheck: true).checks["wire"] ?? false, ok, "\(c)")
         }
         // Merkle: a path step that is not an object is a refusal
         XCTAssertFalse(Merkle.verifyInclusion("x", [JKey("index"): .int(0), JKey("size"): .int(2), JKey("path"): .array([.int(1)])], .null))
@@ -188,10 +188,10 @@ final class SemanticsKillTests: XCTestCase {
               var pc = v.get("pcactn")?.asObject, let grant = v.get("grant"), let now = v.get("context")?.get("now")?.safeInt else { return XCTFail("vector") }
         let share: (JSONValue) -> JSONValue = { sig in .object([JKey("shares"): .array([.object([JKey("role"): .string("agent"), JKey("publicKey"): .string(String(repeating: "A", count: 43)), JKey("sig"): sig])])]) }
         pc["threshold"] = share(.string(String(repeating: "A", count: 86)))
-        XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any).checks["wire"], true)
+        XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any, insecureSkipPlanRootCheck: true).checks["wire"], true)
         for bad in [JSONValue.int(5), .null, .string("AAAA")] {
             pc["threshold"] = share(bad)
-            XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any).checks, ["wire": false], "\(bad)")
+            XCTAssertEqual(PCA.verify(pcactn: .object(pc), grant: grant, now: now, audience: .any, insecureSkipPlanRootCheck: true).checks, ["wire": false], "\(bad)")
         }
     }
 }

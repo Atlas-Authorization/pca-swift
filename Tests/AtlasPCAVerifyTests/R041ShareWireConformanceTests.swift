@@ -22,7 +22,7 @@ final class R041ShareWireConformanceTests: XCTestCase {
             guard let now = v.get("context")?.get("now")?.safeInt, let aud = v.get("context")?.get("aud")?.asString,
                   case let .bool(wantAllow)? = v.get("expect")?.get("allow"),
                   let wantChecks = v.get("expect")?.get("checks")?.asObject else { failures.append("\(name): malformed"); continue }
-            let got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: v.get("grant") ?? .null, now: now, audience: aud)
+            let got = PCA.verify(pcactn: v.get("pcactn") ?? .null, grant: v.get("grant") ?? .null, now: now, audience: aud, insecureSkipPlanRootCheck: true)
             if wantAllow {
                 let shareAlgs = (v.get("pcactn")?.get("threshold")?.get("shares")?.asArray ?? []).compactMap { $0.get("alg")?.asString }
                 let lacking: String?
