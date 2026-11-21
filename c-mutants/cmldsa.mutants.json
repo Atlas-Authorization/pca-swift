@@ -1,0 +1,114 @@
+[
+ {
+  "id": "v65-siglen",
+  "line": "    if (sig_len != SIG65 || pk_len != PK65) return 0;",
+  "from": "sig_len != SIG65",
+  "to": "sig_len == SIG65",
+  "what": "a right-length ML-DSA-65 signature refused"
+ },
+ {
+  "id": "v65-pklen",
+  "line": "    if (sig_len != SIG65 || pk_len != PK65) return 0;",
+  "from": "pk_len != PK65",
+  "to": "pk_len == PK65",
+  "what": "a right-length ML-DSA-65 key refused"
+ },
+ {
+  "id": "v87-siglen",
+  "line": "    if (sig_len != SIG87 || pk_len != PK87) return 0;",
+  "from": "sig_len != SIG87",
+  "to": "sig_len == SIG87",
+  "what": "a right-length ML-DSA-87 signature refused"
+ },
+ {
+  "id": "v87-pklen",
+  "line": "    if (sig_len != SIG87 || pk_len != PK87) return 0;",
+  "from": "pk_len != PK87",
+  "to": "pk_len == PK87",
+  "what": "a right-length ML-DSA-87 key refused"
+ },
+ {
+  "id": "v65-accept",
+  "line": "    return cmldsa_ml_dsa_65_ref_verify(sig, sig_len, m, msg_len, NULL, 0, pk) == 0;",
+  "from": "pk) == 0;",
+  "to": "pk) != 0;",
+  "what": "the ML-DSA-65 verdict inverted"
+ },
+ {
+  "id": "v87-accept",
+  "line": "    return cmldsa_ml_dsa_87_ref_verify(sig, sig_len, m, msg_len, NULL, 0, pk) == 0;",
+  "from": "pk) == 0;",
+  "to": "pk) != 0;",
+  "what": "the ML-DSA-87 verdict inverted"
+ },
+ {
+  "id": "len65-pk",
+  "line": "  if (level == 65) return which == 0 ? PK65 : which == 1 ? SK65 : which == 2 ? SIG65 : 0;",
+  "from": "which == 0 ? PK65",
+  "to": "which == 0 ? PK65 + 1",
+  "what": "ML-DSA-65 public key size one over"
+ },
+ {
+  "id": "len65-sk",
+  "line": "  if (level == 65) return which == 0 ? PK65 : which == 1 ? SK65 : which == 2 ? SIG65 : 0;",
+  "from": "which == 1 ? SK65",
+  "to": "which == 1 ? SK65 + 1",
+  "what": "ML-DSA-65 secret key size one over"
+ },
+ {
+  "id": "len65-sig",
+  "line": "  if (level == 65) return which == 0 ? PK65 : which == 1 ? SK65 : which == 2 ? SIG65 : 0;",
+  "from": "which == 2 ? SIG65",
+  "to": "which == 2 ? SIG65 + 1",
+  "what": "ML-DSA-65 signature size one over"
+ },
+ {
+  "id": "len87-pk",
+  "line": "  if (level == 87) return which == 0 ? PK87 : which == 1 ? SK87 : which == 2 ? SIG87 : 0;",
+  "from": "which == 0 ? PK87",
+  "to": "which == 0 ? PK87 + 1",
+  "what": "ML-DSA-87 public key size one over"
+ },
+ {
+  "id": "len87-sk",
+  "line": "  if (level == 87) return which == 0 ? PK87 : which == 1 ? SK87 : which == 2 ? SIG87 : 0;",
+  "from": "which == 1 ? SK87",
+  "to": "which == 1 ? SK87 + 1",
+  "what": "ML-DSA-87 secret key size one over"
+ },
+ {
+  "id": "len87-sig",
+  "line": "  if (level == 87) return which == 0 ? PK87 : which == 1 ? SK87 : which == 2 ? SIG87 : 0;",
+  "from": "which == 2 ? SIG87",
+  "to": "which == 2 ? SIG87 + 1",
+  "what": "ML-DSA-87 signature size one over"
+ },
+ {
+  "id": "seed-copy",
+  "line": "    memcpy(seed_buf, seed, 32);",
+  "from": "32",
+  "to": "0",
+  "what": "the seed never reaches the generator"
+ },
+ {
+  "id": "seed-hook",
+  "line": "    cmldsa_randombytes_hook(seeded_rng);",
+  "from": "cmldsa_randombytes_hook(seeded_rng);",
+  "to": "(void)0;",
+  "what": "a seeded key drawn from the OS CSPRNG"
+ },
+ {
+  "id": "seed-unhook",
+  "line": "    cmldsa_randombytes_hook(NULL);",
+  "from": "cmldsa_randombytes_hook(NULL);",
+  "to": "(void)0;",
+  "what": "the seeded generator stays installed after key generation"
+ },
+ {
+  "id": "seed-width",
+  "line": "  for (size_t i = 0; i < n; i++) out[i] = i < 32 ? seed_buf[i] : 0;",
+  "from": "i < 32",
+  "to": "i < 16",
+  "what": "only half of the seed is used"
+ }
+]

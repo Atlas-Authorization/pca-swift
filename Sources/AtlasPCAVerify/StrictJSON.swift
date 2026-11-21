@@ -4,15 +4,15 @@ import CryptoKit
 /// Canonical JSON, the strict JSON profile, strict base64url and SHA-256 — ported byte-for-byte from
 /// `@atlasauth/pca`'s `hash.ts` / `strict-json.ts` (and matching the Rust / Go / .NET verifiers). This is
 /// the make-or-break cross-language layer: every digest and signed message is computed over these bytes.
-enum Canonical {
+public enum Canonical {
     static let MAX_SAFE: Int64 = 9_007_199_254_740_991 // 2^53 - 1
-    static let MAX_JSON_DEPTH = 32
+    public static let MAX_JSON_DEPTH = 32
     /// Recursion bound of the NON-strict paths (lenient canonicalization of a caller-supplied grant / Merkle leaf and the
     /// lenient corpus loader). Far above anything signable (the strict profile stops at MAX_JSON_DEPTH), so it never
     /// changes a verdict; it only turns a stack overflow on a hostile, absurdly deep tree into a clean refusal.
     static let MAX_LENIENT_DEPTH = 1024
-    static let MAX_JSON_BYTES = 1 << 20
-    static let MAX_DECIMAL_DIGITS = 15
+    public static let MAX_JSON_BYTES = 1 << 20
+    public static let MAX_DECIMAL_DIGITS = 15
 
     /// Sentinel scalar the conformance TEST HARNESS substitutes for a lone surrogate (which a Swift `String` cannot
     /// hold) when it loads object-form vectors; the harness itself treats a tree carrying it as a `wire` failure.
@@ -21,7 +21,7 @@ enum Canonical {
     /// version that used U+10FFFF here wrongly rejected a VALID U+10FFFF (`\uDBFF\uDFFF`) in signed content.
     static let LONE_SURROGATE_SENTINEL: Unicode.Scalar = Unicode.Scalar(0xFDD0)!
 
-    static func hasLoneSurrogate(_ s: String) -> Bool {
+    public static func hasLoneSurrogate(_ s: String) -> Bool {
         s.unicodeScalars.contains(LONE_SURROGATE_SENTINEL)
     }
 
@@ -31,7 +31,7 @@ enum Canonical {
     static func utf8(_ s: String) -> [UInt8] { Array(s.utf8) }
 
     /// UTF-8 bytewise comparison (== Unicode code point order).
-    static func compareUtf8(_ a: String, _ b: String) -> Int {
+    public static func compareUtf8(_ a: String, _ b: String) -> Int {
         let x = Array(a.utf8), y = Array(b.utf8)
         let n = min(x.count, y.count)
         var i = 0
@@ -109,14 +109,14 @@ enum Canonical {
     /// Lenient canonical JSON (capability content addressing, Merkle leaves). Never throws for in-profile data.
     /// Out-of-profile input (non-finite number, nesting deeper than MAX_LENIENT_DEPTH) yields "" (whose hash matches no
     /// real canonical form), never a truncated prefix that two different trees could share.
-    static func canonicalize(_ v: JSONValue) -> String {
+    public static func canonicalize(_ v: JSONValue) -> String {
         var out = ""
         do { try ser(&out, v, strict: false, depth: 1) } catch { return "" }
         return out
     }
 
     /// Strict canonical form of a signed body (wire v2). Throws on any out-of-profile value.
-    static func canonicalizeStrict(_ v: JSONValue) throws -> String {
+    public static func canonicalizeStrict(_ v: JSONValue) throws -> String {
         var out = ""
         try ser(&out, v, strict: true, depth: 1)
         return out
@@ -152,14 +152,16 @@ enum Canonical {
             jsString(&out, s)
         case let .int(i):
             if strict, let e = intError(i) { throw CanonicalError(message: "canonicalize: \(e)") }
-            out.append(String(i))
+            // the lenient form is JSON.stringify of a JavaScript number: past 2^53 the integer is its double
+            out.append(!strict && (i > MAX_SAFE || i < -MAX_SAFE) ? JS.number(Double(i)) : String(i))
         case let .double(d):
             if strict {
                 if let e = doubleError(d) { throw CanonicalError(message: "canonicalize: \(e)") }
             } else if !d.isFinite {
                 throw CanonicalError(message: "canonicalize: non-finite number")
             }
-            out.append(numberString(d))
+            // lenient: ECMAScript Number::toString (an exponent from 1e21 up and below 1e-6, as JSON.stringify writes it); strict is plain decimal
+            out.append(strict ? numberString(d) : JS.number(d))
         case let .array(a):
             if depth > (strict ? MAX_JSON_DEPTH : MAX_LENIENT_DEPTH) { throw CanonicalError(message: "canonicalize: nesting too deep") }
             out.append("[")
@@ -182,7 +184,7 @@ enum Canonical {
         }
     }
 
-    static func canonicalBytes(_ v: JSONValue) throws -> [UInt8] { try utf8(canonicalizeStrict(v)) }
+    public static func canonicalBytes(_ v: JSONValue) throws -> [UInt8] { try utf8(canonicalizeStrict(v)) }
 
     /// base64url(sha256(lenient canonical(v))).
     static func hashCanonical(_ v: JSONValue) -> String {

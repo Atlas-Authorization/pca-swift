@@ -1,0 +1,6 @@
+[
+ {
+  "id": "empty-host",
+  "reason": "Equivalent: the host is set on a special-scheme (ws) URL, where the URL standard makes the hostname setter fail on an empty host, and input that the parser strips to nothing (tab, newline) is empty too; an empty input is already refused above. So set_hostname never succeeds with an empty result and the extra check is never decided."
+ }
+]

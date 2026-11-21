@@ -2,8 +2,8 @@ import Foundation
 
 /// RFC-6962-shaped Merkle tree + plan-leaf construction, mirroring `merkle.ts` / the Rust reference.
 /// Leaf = H(0x00 ‖ canon(leaf)), node = H(0x01 ‖ L ‖ R), split at the largest power of two < n.
-enum Merkle {
-    static let DEFAULT_REVERSIBILITY_CLASS = "reversible"
+public enum Merkle {
+    public static let DEFAULT_REVERSIBILITY_CLASS = "reversible"
 
     static func leafHash(_ leaf: JSONValue) -> [UInt8] {
         var m: [UInt8] = [0x00]
@@ -31,7 +31,7 @@ enum Merkle {
         return nodeHash(build(Array(hs[..<k])), build(Array(hs[k...])))
     }
 
-    static func merkleRoot(_ leaves: [JSONValue]) -> String? {
+    public static func merkleRoot(_ leaves: [JSONValue]) -> String? {
         if leaves.isEmpty { return nil }
         return Base64URLStrict.encode(build(leaves.map(leafHash)))
     }
@@ -56,7 +56,7 @@ enum Merkle {
               let path = proof["path"]?.asArray,
               let index = proof["index"]?.safeInt,
               let size = proof["size"]?.safeInt else { return false }
-        if size < 1 || index < 0 || index >= size { return false }
+        if size < 1 || index < 0 || index >= size || IV.num(proof["index"]).map(IV.isNegZero) == true { return false } // strict profile: never -0
         let shape = pathShape(UInt64(index), UInt64(size))
         if shape.count != path.count { return false }
         var h = leafHash(leaf)
@@ -81,7 +81,7 @@ enum Merkle {
     }
 
     /// Recompute the committed plan leaf for an action (the verifier never trusts the carried leaf).
-    static func planLeaf(_ nodeId: JSONValue?, _ action: JObject?, _ cond: String) -> JSONValue? {
+    public static func planLeaf(_ nodeId: JSONValue?, _ action: JObject?, _ cond: String) -> JSONValue? {
         guard let nodeId = nodeId, !nodeId.isNull else { return nil }
         func get(_ k: String) -> JSONValue { action?[JKey(k)] ?? .null }
         let pd: JSONValue

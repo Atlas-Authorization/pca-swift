@@ -1,0 +1,43 @@
+name: Ada IDNA
+
+# Ada (ada-url/ada, the parser Node's URL uses, Apache-2.0 / MIT) is vendored in Sources/CAda as the pinned single-file release and linked into AtlasPCAVerify,
+# so a non-ASCII host works for every consumer with no setup. This job proves the vendored files are the pinned release (SHA-256), that the core product
+# builds with them, and that the IDN corpus cases (vc "url idn", ciba payees) run on Ada.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ADA_TAG: v4.0.0
+  ADA_CPP_SHA256: 1c722f8f5355d6bf2bf3601870684edc875aa8f56b4d4735440d96263dd0207c
+  ADA_H_SHA256: 0010b17b3ff489e13998e86d921b16e1643e370ee3276c584f1b0c4b72bdf628
+
+jobs:
+  ada:
+    name: swift test IDN cases on Ada (macos)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Vendored Ada amalgamation is the pinned release
+        run: |
+          echo "$ADA_CPP_SHA256  Sources/CAda/ada.cpp" | shasum -a 256 -c -
+          echo "$ADA_H_SHA256  Sources/CAda/ada.h" | shasum -a 256 -c -
+      - name: Build
+        run: swift build --product AtlasPCAVerify
+      - name: IDN corpus cases (vc, ciba, whatwg url)
+        run: swift test --filter 'RefVcTests|RefCibaTests|RefOAuthTests|RefWebBotAuthTests'

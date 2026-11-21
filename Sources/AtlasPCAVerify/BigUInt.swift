@@ -39,11 +39,14 @@ struct BigUInt: Comparable, Equatable {
         var acc = BigUInt(0)
         let ten = BigUInt(10)
         for ch in s.unicodeScalars {
-            let d = UInt64(ch.value) - 48
-            precondition(d <= 9, "BigUInt(decimal:) non-digit")
+            guard let d = BigUInt.decimalDigit(ch) else { preconditionFailure("BigUInt(decimal:) non-digit") }
             acc = acc * ten + BigUInt(d)
         }
         self = acc
+    }
+
+    static func decimalDigit(_ ch: Unicode.Scalar) -> UInt64? {
+        ch.value >= 48 && ch.value <= 57 ? UInt64(ch.value &- 48) : nil
     }
 
     var isZero: Bool { limbs.isEmpty }
@@ -75,7 +78,7 @@ struct BigUInt: Comparable, Equatable {
 
     static func + (a: BigUInt, b: BigUInt) -> BigUInt {
         let n = max(a.limbs.count, b.limbs.count)
-        var out = [UInt32](); out.reserveCapacity(n + 1)
+        var out = [UInt32]()
         var carry: UInt64 = 0
         for i in 0..<n {
             let av = i < a.limbs.count ? UInt64(a.limbs[i]) : 0

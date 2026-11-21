@@ -1,0 +1,49 @@
+name: Endemic LWE base OT
+
+# AtlasPCALweOt: the post-quantum endemic base OT. Its Kyber-768 K-PKE core is the audited pqc_kyber reference behind a small C library (liblweot),
+# built here from the flagship's crate into the C target. The native replays the TypeScript reference corpus, byte for byte.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lwe-ot:
+    name: swift test AtlasPCALweOt (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Source layout (full shared corpus and the lattice crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: liblweot into the C target
+        run: |
+          dir="$(.github/scripts/build-liblweot.sh "$RUNNER_TEMP/lweot" "$RUNNER_TEMP/mono/packages/pca-mpc-lwe-ot-wasm/crate" | tail -1)"
+          mkdir -p "$PCA_MONO_SDK/Sources/CLweOt/lib"
+          cp "$dir"/liblweot.* "$PCA_MONO_SDK/Sources/CLweOt/lib/"
+          # the shared library name must be what the linker asks for (-llweot) and what the loader finds through the rpath
+          test -e "$PCA_MONO_SDK/Sources/CLweOt/lib/liblweot.dylib"
+          install_name_tool -id "@rpath/liblweot.dylib" "$PCA_MONO_SDK/Sources/CLweOt/lib/liblweot.dylib"
+          diff "$dir/pca_lwe_ot.h" "$PCA_MONO_SDK/Sources/CLweOt/include/CLweOt.h"
+      - name: Build
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift build --product AtlasPCALweOt
+      - name: Endemic OT replay
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        env:
+          ATLAS_PCA_LIBLWEOT_REQUIRED: '1'
+        run: swift test --filter AtlasPCALweOtTests
