@@ -19,6 +19,45 @@ enum IV {
         }
     }
 
+    /// JS `Number(string)`: NaN outside StringNumericLiteral. `Double(String)` alone is wrong here: it also takes nan, inf and infinity in
+    /// any case, and signed or fractional hex floats, and refuses 0o / 0b.
+    static func jsNumber(_ s: String) -> Double {
+        let t = Array(Attest.jsTrim(s).utf8)
+        if t.isEmpty { return 0 }
+        if t.count >= 2, t[0] == 48, let bits = [UInt8(ascii: "x"): 4, UInt8(ascii: "o"): 3, UInt8(ascii: "b"): 1][t[1] | 0x20] {
+            var bin: [UInt8] = []
+            for c in t[2...] {
+                guard let v = ACrypto.nibble(c), Int(v) < 1 << bits else { return .nan }
+                for b in (0..<bits).reversed() { bin.append((v >> UInt8(b)) & 1) }
+            }
+            if bin.isEmpty { return .nan }
+            bin.insert(contentsOf: [UInt8](repeating: 0, count: (4 - bin.count % 4) % 4), at: 0)
+            // via a hex float: exact rounding above 2^53, Infinity on overflow, as JS
+            var hex = "0x"
+            for k in stride(from: 0, to: bin.count, by: 4) { hex += String(bin[k..<k + 4].reduce(UInt8(0)) { $0 * 2 + $1 }, radix: 16) }
+            return Double(hex) ?? .nan
+        }
+        var i = t[0] == 43 || t[0] == 45 ? 1 : 0
+        if t[i...].elementsEqual("Infinity".utf8) { return t[0] == 45 ? -.infinity : .infinity }
+        func run() -> Int {
+            let from = i
+            while i < t.count, t[i] >= 48, t[i] <= 57 { i += 1 }
+            return i - from
+        }
+        var digits = run()
+        if i < t.count, t[i] == 46 {
+            i += 1
+            digits += run()
+        }
+        if digits == 0 { return .nan }
+        if i < t.count, t[i] | 0x20 == 101 {
+            i += 1
+            if i < t.count, t[i] == 43 || t[i] == 45 { i += 1 }
+            if run() == 0 { return .nan }
+        }
+        return i == t.count ? Double(String(decoding: t, as: UTF8.self)) ?? .nan : .nan
+    }
+
     static func isNegZero(_ d: Double) -> Bool { d == 0 && d.sign == .minus }
 
     /// `Number.isSafeInteger(x)` (accepts -0).

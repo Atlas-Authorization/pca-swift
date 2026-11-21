@@ -56,7 +56,7 @@ enum Merkle {
               let path = proof["path"]?.asArray,
               let index = proof["index"]?.safeInt,
               let size = proof["size"]?.safeInt else { return false }
-        if size < 1 || index < 0 || index >= size { return false }
+        if size < 1 || index < 0 || index >= size || IV.num(proof["index"]).map(IV.isNegZero) == true { return false } // strict profile: never -0
         let shape = pathShape(UInt64(index), UInt64(size))
         if shape.count != path.count { return false }
         var h = leafHash(leaf)

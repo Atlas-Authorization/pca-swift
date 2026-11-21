@@ -396,7 +396,7 @@ enum IntentAcc {
             }
             // the tracked {version, digest}: an older set is a rollback, ANOTHER set under the same version an equivocation (skip)
             if let t = fresh.tracked {
-                let v = IV.nonNeg(k.get("version")) ?? 0
+                guard let v = IV.nonNeg(k.get("version")) else { continue } // keySetShapeError passed: version >= 1
                 if v < t.version || (v == t.version && !IV.same(keySetDigest(k), t.digest)) { continue }
             }
             guard let ksIssued = IV.num(k.get("issued_at")), ksIssued <= now + RECEIPT_SKEW_MS, now - ksIssued <= fresh.maxKeySetAgeMs else { continue }
@@ -410,11 +410,8 @@ enum IntentAcc {
             }
             if IV.sigAlg(e["alg"]) != IV.sigAlg(r["alg"]) { continue }
             let pin = e["pq_pk"].map { $0.asString ?? "" }
-            switch verifyReceiptSignature(rv, expectedSigner: pk, pin: pin) {
-            case .valid: return .valid
-            case .unsupported: unsupported = true
-            case .invalid: break
-            }
+            // receiptShapeError above already returned .unsupported for every alg the dispatch does not resolve
+            if verifyReceiptSignature(rv, expectedSigner: pk, pin: pin) == .valid { return .valid }
         }
         return unsupported ? .unsupported : .invalid
     }

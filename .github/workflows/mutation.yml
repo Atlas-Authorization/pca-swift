@@ -2,8 +2,9 @@ name: Mutation
 
 # Mutation testing of AtlasPCAVerify with the operator mutator in the flagship (tools/pca-audit/swift-mutate; oracle =
 # swift test AtlasPCAVerifyTests incl. the full adversarial corpus) over every file of Sources/AtlasPCAVerify (incl. the
-# Intent Layer v2 ones), split into 24 shards (every 24th mutant; 8 shards took 30-45 min each on the 0.4.1 sources, a
-# third of the current ones). Runs on Linux
+# Intent Layer v2 ones and every mN module: staleness, operations, plans, assurance, guard, store conformance) and of
+# Sources/AtlasPCASQLite (oracle AtlasPCASQLiteTests) and Sources/AtlasPCAStepUp (oracle AtlasPCAStepUpTests), split into 256 shards (contiguous slices, so a shard verifies few oracle groups: 0.5 has ~17k mutants, 4x 0.4.2, whose 24 shards took 1-2 h each). Each mutant first
+# runs the test classes named after its file (fail fast), then the whole suite; the per-mutant time limit is measured per file. Runs on Linux
 # like the ledgered runs: linux-prep.sh builds the package against swift-crypto and liboqs (ML-DSA-65), so the
 # post-quantum vectors really run. The merge job checks the survivors against the equivalent-mutant ledger: it passes when
 # every survivor is a ledgered equivalent and no ledger entry is stale. Runs on demand and on ci/** branches (the
@@ -43,9 +44,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'push' }}
 
+# Actions.swift (action kit) is mutated with every other Sources file; ActionsVectorTests (shared vectors, flagship layout) is part of the suite.
 env:
   CRATE: swift-pca
-  SHARDS: '24'
+  SHARDS: '256'
+  # shard reports: the 256 Linux slices + report 257 = the macOS leg (the lines Linux does not compile)
+  REPORTS: '257'
   WORKERS: '2'
   # part of the baseline identity: a run with other mutator settings is no baseline
   MUT_CFG: 'swift-mutate workers=2'
@@ -64,7 +68,7 @@ jobs:
         run: .github/scripts/mutation-layout.sh "$CRATE"
       - name: Snapshot
         run: |
-          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          find Sources -name '*.swift' | LC_ALL=C sort > "$RUNNER_TEMP/src.txt"
           node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
             --corpus-root="$MONO" --out=mut-snapshot --cfg="$MUT_CFG" \
             --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
@@ -75,13 +79,14 @@ jobs:
           retention-days: 30
 
   shard:
-    name: shard ${{ matrix.shard }}/24
+    name: shard ${{ matrix.shard }}/256
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
+      max-parallel: 256 # Enterprise plan: 500 concurrent jobs org-wide; GitHub queues anything above that
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -89,6 +94,8 @@ jobs:
           node-version: 22
       - name: Flagship tooling + source layout
         run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: SQLite headers (the AtlasPCASQLite target builds with the package)
+        run: sudo apt-get install -y -qq libsqlite3-dev
       - name: Linux toolchain (Swift 6.0.3, swift-crypto, liboqs ML-DSA-65)
         working-directory: ${{ env.MONO }}
         run: |
@@ -100,7 +107,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           BASELINE: ${{ inputs.baseline_run }}
         run: |
-          ls Sources/AtlasPCAVerify/*.swift > "$RUNNER_TEMP/src.txt"
+          find Sources -name '*.swift' | LC_ALL=C sort > "$RUNNER_TEMP/src.txt"
           node "$MONO/tools/pca-audit/mut-carry/snapshot.mjs" make --root="$GITHUB_WORKSPACE" --exclude-list="$RUNNER_TEMP/src.txt" \
             --corpus-root="$MONO" --out="$RUNNER_TEMP/snap" --cfg="$MUT_CFG" \
             --tool-files="$MONO/tools/pca-audit/swift-mutate/mutate.mjs,$MONO/tools/pca-audit/mut-carry/lib.mjs"
@@ -115,15 +122,18 @@ jobs:
             mkdir -p "$TMPDIR/swiftmut/w$w/sdks/swift-pca"
             ln -sfn "$MONO/sdks/swift-pca/conformance" "$TMPDIR/swiftmut/w$w/sdks/swift-pca/conformance"
           done
-          FILES="$(cd sdks/swift-pca && ls Sources/AtlasPCAVerify/*.swift | tr '\n' ' ')"
+          FILES="$(cd sdks/swift-pca && find Sources -name '*.swift' | LC_ALL=C sort | tr '\n' ' ')"
           node tools/pca-audit/swift-mutate/mutate.mjs run "$WORKERS" 320 "$RUNNER_TEMP/raw.json" $FILES \
             --every="$SHARDS" --offset=$(( ${{ matrix.shard }} - 1 )) ${BASE_POOL:+--carry="$BASE_POOL"}
-          # the next run's baseline: this slice's results (carried ones included)
-          mkdir -p "$RUNNER_TEMP/mut-results"; cp "$RUNNER_TEMP/raw.json" "$RUNNER_TEMP/mut-results/results.json"
           node -e '
             const fs = require("fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-            const want = Number(process.argv[2]); if (r.length < want) { console.error(`budget ran out: ${r.length} of ${want} mutants`); process.exit(1); }
-          ' "$RUNNER_TEMP/raw.json" "$(node tools/pca-audit/swift-mutate/mutate.mjs list $(for f in $FILES; do echo sdks/swift-pca/$f; done) 2>/dev/null | awk -v n="$SHARDS" -v k=$(( ${{ matrix.shard }} - 1 )) 'BEGIN{c=0} { if ((NR-1) % n == k) c++ } END{print c}')"
+            const want = Number(process.argv[2]); if (!(want > 0) || r.length < want) { console.error(`budget ran out: ${r.length} of ${want} mutants`); process.exit(1); }
+          ' "$RUNNER_TEMP/raw.json" "$(node tools/pca-audit/swift-mutate/mutate.mjs list $(for f in $FILES; do echo sdks/swift-pca/$f; done) 2>/dev/null | awk -v n="$SHARDS" -v k=$(( ${{ matrix.shard }} - 1 )) 'END{print int((k+1)*NR/n) - int(k*NR/n)}')"
+      - name: Keep results (also a partial slice when the budget ran out or the job was cancelled; the next targeted run resumes it)
+        if: always()
+        run: |
+          # the next run's baseline: this slice's results (carried ones included)
+          mkdir -p "$RUNNER_TEMP/mut-results"; [ -f "$RUNNER_TEMP/raw.json" ] && cp "$RUNNER_TEMP/raw.json" "$RUNNER_TEMP/mut-results/results.json" || true
       - name: Report
         run: |
           node "$MONO/tools/pca-audit/swift-mutate/mutate.mjs" survivors --src="$MONO/sdks/swift-pca" "$RUNNER_TEMP/raw.json" > survivors-raw.json
@@ -132,21 +142,130 @@ jobs:
             const counts = {}; for (const m of r) counts[m.status] = (counts[m.status] || 0) + 1;
             const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map((x) => { const o = { ...x }; if (o.occurrence === undefined) delete o.occurrence; return o; });
             fs.writeFileSync("counts.json", JSON.stringify(counts)); fs.writeFileSync("survivors.json", JSON.stringify(s));
+            // run errors (a crash or memory-cap kill with no assertion failing): listed per mutant, the merge needs a reason for each
+            const errs = r.filter((m) => m.status === "RUNERR" || m.status === "TIMEOUT").map((m) => ({ file: m.file, lineno: m.line, text: m.orig, mutant: `${m.op} => ${m.repl}`, status: m.status, evidence: m.evidence ?? "timeout" }));
+            fs.writeFileSync("run-errors-${{ matrix.shard }}.json", JSON.stringify(errs, null, 1));
+            fs.writeFileSync("traps-${{ matrix.shard }}.json", JSON.stringify(r.filter((m) => m.status === "TRAP").map((m) => ({ file: m.file, lineno: m.line, text: m.orig, mutant: `${m.op} => ${m.repl}`, test: m.trap?.test, message: m.trap?.message })), null, 1));
           ' "$RUNNER_TEMP/raw.json"
-          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$SHARDS" --tool=swift-mutate \
+          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard=${{ matrix.shard }} --of="$REPORTS" --tool=swift-mutate \
             --counts=counts.json --survivors=survivors.json --out=shard-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
-          path: shard-${{ matrix.shard }}.json
+          path: |
+            shard-${{ matrix.shard }}.json
+            run-errors-${{ matrix.shard }}.json
+            traps-${{ matrix.shard }}.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mut-results-${{ matrix.shard }}
           path: ${{ runner.temp }}/mut-results/
           retention-days: 30
+          if-no-files-found: ignore
+
+  # The lines a Linux build does not compile (#if canImport(Security) Keychain store, the CryptoKit ML-DSA branch, ...) are mutated on
+  # macOS, natively (CryptoKit, Keychain), on both OS generations: below 26 (no CryptoKit ML-DSA: the refusal fall-through runs) and
+  # 26+ (the CryptoKit ML-DSA branch runs). A mutant counts detected when either OS detects it (each branch only runs on one).
+  apple:
+    name: apple (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Select Xcode 26 (the MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+          sw_vers
+      - name: Throwaway unlocked default keychain (KeychainSecretStoreTests)
+        run: |
+          security create-keychain -p ci "$RUNNER_TEMP/ci.keychain-db"
+          security set-keychain-settings "$RUNNER_TEMP/ci.keychain-db"
+          security unlock-keychain -p ci "$RUNNER_TEMP/ci.keychain-db"
+          security list-keychains -d user -s "$RUNNER_TEMP/ci.keychain-db"
+          security default-keychain -s "$RUNNER_TEMP/ci.keychain-db"
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - name: Mutate (SWIFTMUT_APPLE=1, only the lines Linux does not compile)
+        working-directory: ${{ env.MONO }}
+        env:
+          SWIFTMUT_APPLE: '1'
+        run: |
+          export TMPDIR="$RUNNER_TEMP/smt"; mkdir -p "$TMPDIR/swiftmut/w0/sdks/swift-pca"
+          ln -sfn "$MONO/sdks/swift-pca/conformance" "$TMPDIR/swiftmut/w0/sdks/swift-pca/conformance"
+          FILES="$(cd sdks/swift-pca && find Sources -name '*.swift' | LC_ALL=C sort | tr '\n' ' ')"
+          node tools/pca-audit/swift-mutate/mutate.mjs run 1 320 "$RUNNER_TEMP/raw.json" $FILES
+          node -e '
+            const fs = require("fs"); const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const want = Number(process.argv[2]); if (!(want > 0) || r.length < want) { console.error(`incomplete: ${r.length} of ${want} mutants`); process.exit(1); }
+          ' "$RUNNER_TEMP/raw.json" "$(node tools/pca-audit/swift-mutate/mutate.mjs list $(for f in $FILES; do echo sdks/swift-pca/$f; done) 2>/dev/null | wc -l)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-raw-${{ matrix.os }}
+          path: ${{ runner.temp }}/raw.json
+
+  apple-report:
+    needs: apple
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - uses: actions/download-artifact@v4
+        with:
+          path: apple
+          pattern: apple-raw-*
+      - name: Combine the two OS legs (detected on either = detected) and report
+        env:
+          SWIFTMUT_APPLE: '1'
+        run: |
+          node -e '
+            const fs = require("fs");
+            const legs = ["macos-15", "macos-latest"].map((o) => JSON.parse(fs.readFileSync(`apple/apple-raw-${o}/raw.json`, "utf8")));
+            const key = (m) => `${m.file}#${m.idx}`;
+            const other = new Map(legs[1].map((m) => [key(m), m]));
+            if (legs[0].length !== legs[1].length || legs[0].some((m) => !other.has(key(m)) || other.get(key(m)).orig !== m.orig)) { console.error("the two legs mutated different mutants"); process.exit(1); }
+            const rank = { KILLED: 5, TIMEOUT: 4, TRAP: 3, RUNERR: 2, SURVIVED: 1, NONVIABLE: 0 };
+            const out = legs[0].map((m) => { const o = other.get(key(m)); return (rank[o.status] ?? -1) > (rank[m.status] ?? -1) ? o : m; });
+            if (out.some((m) => !(m.status in rank))) { console.error("unknown status"); process.exit(1); }
+            fs.writeFileSync("raw.json", JSON.stringify(out));
+            const counts = {}; for (const m of out) counts[m.status] = (counts[m.status] || 0) + 1;
+            fs.writeFileSync("counts.json", JSON.stringify(counts)); console.log(JSON.stringify(counts));
+            const errs = out.filter((m) => m.status === "RUNERR" || m.status === "TIMEOUT").map((m) => ({ file: m.file, lineno: m.line, text: m.orig, mutant: `${m.op} => ${m.repl}`, status: m.status, evidence: m.evidence ?? "timeout" }));
+            fs.writeFileSync(`run-errors-${process.env.REPORTS}.json`, JSON.stringify(errs, null, 1));
+            fs.writeFileSync(`traps-${process.env.REPORTS}.json`, JSON.stringify(out.filter((m) => m.status === "TRAP").map((m) => ({ file: m.file, lineno: m.line, text: m.orig, mutant: `${m.op} => ${m.repl}`, test: m.trap?.test, message: m.trap?.message })), null, 1));
+          '
+          node "$MONO/tools/pca-audit/swift-mutate/mutate.mjs" survivors --src="$MONO/sdks/swift-pca" raw.json > survivors-raw.json
+          node -e '
+            const fs = require("fs");
+            const s = JSON.parse(fs.readFileSync("survivors-raw.json", "utf8")).map((x) => { const o = { ...x }; if (o.occurrence === undefined) delete o.occurrence; return o; });
+            fs.writeFileSync("survivors.json", JSON.stringify(s));
+          '
+          node .github/scripts/mutation-shard-report.mjs --crate="$CRATE" --shard="$REPORTS" --of="$REPORTS" --tool=swift-mutate \
+            --counts=counts.json --survivors=survivors.json --out=shard-$REPORTS.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ env.REPORTS }}
+          path: |
+            shard-${{ env.REPORTS }}.json
+            run-errors-${{ env.REPORTS }}.json
+            traps-${{ env.REPORTS }}.json
 
   merge:
-    needs: shard
+    needs: [shard, apple-report]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -157,14 +276,54 @@ jobs:
           node-version: 22
       - name: Flagship checker + ledger
         run: .github/scripts/mutation-layout.sh "$CRATE"
+      # the plan is every *.swift under Sources (recursive). Fail on what that find would miss: a target outside Sources, other compiled sources, a narrowed plan.
+      - name: Every shipped source is in the mutation plan
+        run: |
+          bad="$(find Sources -type f ! -name '*.swift' ! -path 'Sources/CSQLite3/*'; grep -o 'path: "[^"]*"' Package.swift | grep -v 'path: "\(Sources\|Tests\)/' || true)"
+          if [ -n "$bad" ]; then echo "::error::outside the mutation plan: $bad"; exit 1; fi
+          [ "$(grep -c "find Sources -name '\*.swift'" .github/workflows/mutation.yml)" = 4 ] || { echo "::error::a mutation file list is not the recursive find"; exit 1; }
+      - name: Every source file yields mutants, or is named with a reason
+        run: node "$MONO/tools/pca-audit/swift-mutate/mutate.mjs" plan-check
       - uses: actions/download-artifact@v4
         with:
           path: reports
           pattern: shard-*
+      - uses: actions/download-artifact@v4
+        with:
+          path: mut-results
+          pattern: mut-results-*
       - name: Merge shards and check the ledger
-        run: >
-          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$SHARDS" --reports=reports
-          --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE"
+        # a ledgered equivalent that a test KILLED this run is a notice (nondeterministic killer), not a stale entry: stale-killed.mjs
+        run: |
+          rc=0
+          node .github/scripts/mutation-merge.mjs --crate="$CRATE" --shards="$REPORTS" --reports=reports \
+            --checker="$MONO/tools/pca-audit" --src="$GITHUB_WORKSPACE" > "$RUNNER_TEMP/merge.log" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/merge.log"
+          node .github/scripts/stale-killed.mjs "$RUNNER_TEMP/merge.log" mut-results "$rc"
+      # A TIMEOUT is no kill either (BRIEF "Timeouts are not kills", Java's rule): it is listed here too and needs a proof that the mutant itself never ends.
+      # gate honesty: a RUNERR mutant ended without any test assertion deciding it (a signal with no trap message, a stack overflow or
+      # the memory cap; a deterministic runtime trap is the TRAP bucket, checked below). Each must be in sdks/swift-pca/mutation-run-errors.json with a per-mutant reason the mutant itself caused it (the
+      # unmutated group suite passes in the same sandbox); an unlisted one, a stale entry or a missing list fails.
+      - name: Run errors (crash / memory cap, no assertion failed) are each proven mutant-caused
+        if: ${{ !cancelled() }}
+        run: node .github/scripts/runerr-gate.mjs reports mut-results "$MONO/sdks/swift-pca/mutation-run-errors.json" "$REPORTS"
+      # a deterministic Swift runtime trap decided these mutants, not an assertion: a bucket of its own, never a plain kill. Each must
+      # carry its file, line, mutant, failing test and trap message; a missing list or a missing field fails.
+      - name: Runtime traps carry their evidence
+        if: ${{ !cancelled() }}
+        run: |
+          node -e '
+            const fs = require("fs"), path = require("path");
+            const got = []; let lists = 0;
+            const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/^traps-\d+\.json$/.test(e.name)) { lists++; got.push(...JSON.parse(fs.readFileSync(p, "utf8"))); } } };
+            walk("reports");
+            const want = Number(process.env.REPORTS);
+            if (lists !== want) { console.error(`::error::trap lists from ${lists}/${want} reports (a missing list is a failure)`); process.exit(1); }
+            const bad = got.filter((m) => !m.file || !m.lineno || !m.mutant || !m.test || !m.message);
+            for (const m of bad) console.error("::error::runtime trap without its evidence: " + JSON.stringify(m));
+            console.log(`trap bucket: ${got.length} mutant(s) decided by a Swift runtime trap over ${lists} reports, ${bad.length} without evidence`);
+            process.exit(bad.length ? 1 : 0);
+          '
       - uses: actions/upload-artifact@v4
         if: always()
         with:

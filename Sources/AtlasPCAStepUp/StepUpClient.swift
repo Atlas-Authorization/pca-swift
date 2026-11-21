@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// Lists, approves and denies PCA step-ups from the principal's phone.
 ///
@@ -17,10 +20,25 @@ public struct StepUpClient: Sendable {
     private let token: @Sendable () async throws -> String
     private let session: URLSession
 
+    #if canImport(Security)
     public init(dashboardURL: URL, instanceURL: URL, accountId: String, instanceId: String,
                 token: @escaping @Sendable () async throws -> String,
                 key: PrincipalDeviceKey = PrincipalDeviceKey(),
                 session: URLSession = .shared) {
+        self.init(dashboardURL: dashboardURL, instanceURL: instanceURL, accountId: accountId, instanceId: instanceId, token: token, key: key, session: session, keyed: ())
+    }
+    #else
+    /// No Keychain off Apple platforms: the caller names the key's store.
+    public init(dashboardURL: URL, instanceURL: URL, accountId: String, instanceId: String,
+                token: @escaping @Sendable () async throws -> String,
+                key: PrincipalDeviceKey,
+                session: URLSession = .shared) {
+        self.init(dashboardURL: dashboardURL, instanceURL: instanceURL, accountId: accountId, instanceId: instanceId, token: token, key: key, session: session, keyed: ())
+    }
+    #endif
+
+    private init(dashboardURL: URL, instanceURL: URL, accountId: String, instanceId: String,
+                 token: @escaping @Sendable () async throws -> String, key: PrincipalDeviceKey, session: URLSession, keyed: Void) {
         self.dashboardURL = dashboardURL; self.instanceURL = instanceURL
         self.accountId = accountId; self.instanceId = instanceId
         self.token = token; self.key = key; self.session = session
@@ -30,7 +48,8 @@ public struct StepUpClient: Sendable {
 
     /// Pending step-ups awaiting this principal. Already-expired entries are filtered out.
     public func pending() async throws -> [PendingStepUp] {
-        var comps = URLComponents(url: dashboardURL.appendingPathComponent(stepupsPath), resolvingAgainstBaseURL: false)!
+        // resolve against the base: a dashboardURL made relative to a base (URL(string:relativeTo:)) keeps its host
+        var comps = URLComponents(url: dashboardURL.appendingPathComponent(stepupsPath), resolvingAgainstBaseURL: true)!
         comps.queryItems = [URLQueryItem(name: "status", value: "pending")]
         var req = URLRequest(url: comps.url!)
         req.setValue("Bearer \(try await token())", forHTTPHeaderField: "Authorization")
@@ -39,8 +58,12 @@ public struct StepUpClient: Sendable {
         guard let list = try? JSONDecoder().decode(WireList.self, from: data) else {
             throw StepUpError.transport("Unreadable step-up list.")
         }
-        let now = Date()
-        return list.stepups.compactMap { w in
+        return Self.unexpired(list.stepups, now: Date())
+    }
+
+    /// The list entries that have not expired at `now` (an entry expiring exactly at `now` has expired).
+    static func unexpired(_ stepups: [WireStepUp], now: Date) -> [PendingStepUp] {
+        stepups.compactMap { w in
             guard let exp = ISO8601.parse(w.expires_at), exp > now else { return nil }
             return PendingStepUp(id: w.id, grantRef: w.grant_ref, actionVerb: w.action.verb,
                                  actionResource: w.action.resource, requiredT: w.required_t,

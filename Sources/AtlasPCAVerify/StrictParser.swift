@@ -126,16 +126,22 @@ enum StrictJSON {
         mutating func numberLenient() throws -> JSONValue {
             let start = i
             if peek() == 0x2d { i += 1 }
-            while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+            // JSON number grammar: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+            func digits() -> Bool {
+                let s0 = i
+                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                return i > s0
+            }
+            if peek() == 0x30 { i += 1 } else if !digits() { throw err("bad number") }
             var isFloat = false
             if peek() == 0x2e {
                 isFloat = true; i += 1
-                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                if !digits() { throw err("bad number") }
             }
             if let c = peek(), c == 0x65 || c == 0x45 {
                 isFloat = true; i += 1
                 if let s = peek(), s == 0x2b || s == 0x2d { i += 1 }
-                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                if !digits() { throw err("bad number") }
             }
             let lex = String(decoding: b[start..<i], as: UTF8.self)
             // "-0" keeps its sign (JSON.parse("-0") is -0): Int64("-0") would silently drop it

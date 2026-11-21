@@ -3,7 +3,7 @@ import Foundation
 /// An object key compared and hashed by its exact Unicode SCALARS. Swift's `String` ==/hash use canonical
 /// equivalence (so "\u{e9}" == "e\u{301}"), which would silently MERGE two distinct JSON keys (NFC vs NFD) in a
 /// `[String: _]` dictionary and mis-flag them as duplicates. JSON object keys are compared code point by code point.
-public struct JKey: Hashable, ExpressibleByStringLiteral, Comparable {
+public struct JKey: Hashable, ExpressibleByStringLiteral, Comparable, Sendable {
     public let s: String
     public init(_ s: String) { self.s = s }
     public init(stringLiteral v: String) { self.s = v }
@@ -17,7 +17,7 @@ public typealias JObject = [JKey: JSONValue]
 /// mirroring how the strict parser classifies numbers. Objects are stored as a dictionary; the strict
 /// parser rejects duplicate keys before building one, and canonicalization sorts keys bytewise, so
 /// insertion order is never relied upon.
-public indirect enum JSONValue: Equatable {
+public indirect enum JSONValue: Equatable, Sendable {
     case null
     case bool(Bool)
     case int(Int64)
@@ -25,6 +25,20 @@ public indirect enum JSONValue: Equatable {
     case string(String)
     case array([JSONValue])
     case object(JObject)
+
+    /// Strings compare code point by code point (like `JKey`), not by Swift's canonical equivalence: "\u{e9}" != "e\u{301}".
+    public static func == (a: JSONValue, b: JSONValue) -> Bool {
+        switch (a, b) {
+        case (.null, .null): return true
+        case let (.bool(x), .bool(y)): return x == y
+        case let (.int(x), .int(y)): return x == y
+        case let (.double(x), .double(y)): return x == y
+        case let (.string(x), .string(y)): return x.unicodeScalars.elementsEqual(y.unicodeScalars)
+        case let (.array(x), .array(y)): return x == y
+        case let (.object(x), .object(y)): return x == y
+        default: return false
+        }
+    }
 
     var asString: String? { if case let .string(s) = self { return s } else { return nil } }
     var asObject: JObject? { if case let .object(o) = self { return o } else { return nil } }
