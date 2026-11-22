@@ -36,7 +36,7 @@ enum IntentSession {
     /// `validateIntentSessionWire` (part of the terminal `wire` check). nil = well-formed.
     static func validateWire(_ v: JSONValue) -> String? {
         guard case let .object(o) = v else { return "'intent_session' must be an object" }
-        for k in o.keys where !has(FIELDS, k) { return "unknown field 'intent_session.\(k.s)'" }
+        for k in JS.keyOrder(o) where !has(FIELDS, k) { return "unknown field 'intent_session.\(k.s)'" }
         for k in ["session", "root", "seq", "schema"] where o[JKey(k)] == nil { return "missing field 'intent_session.\(k)'" }
         for k in ["session", "root", "schema"] where IV.digest(o[JKey(k)]) == nil { return "'intent_session.\(k)' is not canonical base64url (32 bytes)" }
         guard let seq = IV.nonNeg(o["seq"]), seq <= MAX_SEQ else { return "'intent_session.seq' must be a safe integer in [0, 2147483647]" }
@@ -45,7 +45,7 @@ enum IntentSession {
             var ids = Set<JKey>()
             for (i, x) in acc.enumerated() {
                 guard case let .object(a) = x else { return "'intent_session.acc[\(i)]' must be an object" }
-                for k in a.keys where !has(["id", "post", "receipt"], k) { return "unknown field 'intent_session.acc[\(i)].\(k.s)'" }
+                for k in JS.keyOrder(a) where !has(["id", "post", "receipt"], k) { return "unknown field 'intent_session.acc[\(i)].\(k.s)'" }
                 guard let id = a["id"]?.asString, IV.isId(id) else { return "'intent_session.acc[\(i)].id' must match [A-Za-z0-9_]{1,64}" }
                 if !ids.insert(JKey(id)).inserted { return "'intent_session.acc' ids must be distinct" }
                 if IV.nonNeg(a["post"]) == nil { return "'intent_session.acc[\(i)].post' must be a non-negative safe integer" }
@@ -76,7 +76,7 @@ enum IntentSession {
     /// `intentSessionCaveatError`: exactly {type, session, seq, root, prev?}, prev present iff seq > 0. nil = well-formed.
     static func caveatError(_ c: JSONValue?) -> String? {
         guard case let .object(o)? = c, IV.same(o["type"]?.asString, CAVEAT) else { return "not an intent_session caveat" }
-        for k in o.keys where !has(["type", "session", "seq", "root", "prev"], k) { return "intent_session caveat: unknown member '\(k.s)'" }
+        for k in JS.keyOrder(o) where !has(["type", "session", "seq", "root", "prev"], k) { return "intent_session caveat: unknown member '\(k.s)'" }
         if IV.digest(o["session"]) == nil || IV.digest(o["root"]) == nil {
             return "intent_session caveat: session and root must be canonical base64url (32 bytes)"
         }
@@ -105,7 +105,7 @@ enum IntentSession {
 
     static func shapeError(_ sv: JSONValue) -> String? {
         guard case let .object(s) = sv else { return "session root is not an object" }
-        for k in s.keys where !has(ROOT_KEYS, k) { return "session root: unknown member '\(k.s)'" }
+        for k in JS.keyOrder(s) where !has(ROOT_KEYS, k) { return "session root: unknown member '\(k.s)'" }
         if IV.num(s["v"]) != 1 || !IV.same(s["kind"]?.asString, KIND) { return "not a pca-intent-session v1" }
         if IV.digest(s["session"]) == nil || IV.digest(s["intent_ref"]) == nil { return "session and intent_ref must be canonical base64url (32 bytes)" }
         guard case let .array(ps)? = s["principals"], !ps.isEmpty, ps.count <= MAX_PRINCIPALS else { return "principals must be 1..\(MAX_PRINCIPALS) keys" }
@@ -122,7 +122,7 @@ enum IntentSession {
             return "schema must be {aud, digest}"
         }
         guard case let .object(L)? = s["layers"] else { return "layers must be an object" }
-        for k in L.keys where !has(["org", "std", "task"], k) { return "layers: unknown member '\(k.s)'" }
+        for k in JS.keyOrder(L) where !has(["org", "std", "task"], k) { return "layers: unknown member '\(k.s)'" }
         guard case let .object(task)? = L["task"], task.count == 1, IV.digest(task["map_digest"]) != nil else { return "layers.task must be {map_digest}" }
         // absent = no such layer; null is malformed
         if let org = L["org"] {
@@ -189,6 +189,11 @@ enum IntentSession {
     /// declares a `pq_pk`, must agree. An ed25519 root never consults the pins.
     static func verifyRoot(_ sv: JSONValue, pqPins: JSONValue? = nil) -> (ok: Bool, reason: String) {
         if let e = shapeError(sv) { return (false, e) }
+        return verifyShapedRoot(sv, pqPins: pqPins)
+    }
+
+    /// `verifyRoot` past `shapeError`. Its "malformed" refusals are fail-closed backstops `shapeError` already rules out, testable only through this seam.
+    static func verifyShapedRoot(_ sv: JSONValue, pqPins: JSONValue?) -> (ok: Bool, reason: String) {
         guard case let .object(s) = sv, let signer = s["signer"]?.asString else { return (false, "malformed session root") }
         let principal = s["principals"]?.asArray?.first { IV.same($0.get("key")?.asString, signer) }
         var pin: String? = nil
@@ -206,10 +211,9 @@ enum IntentSession {
         guard let bound = IV.bindSuite(b, alg: s["alg"], pqPk: s["pq_pk"]), let msg = IV.message(SIG_DOMAIN, .object(bound)) else {
             return (false, "malformed session root")
         }
-        switch IV.verifyPinned(alg: s["alg"], identity: signer, artifactPqPk: s["pq_pk"], msg: msg, sig: s["sig"], pqSig: s["pq_sig"], pin: pin) {
-        case .valid: break
-        case .unsupported: return (false, IV.UNSUPPORTED_SUITE)
-        case .invalid: return (false, "session root signature invalid")
+        // the suiteError check above already refused every alg verifyPinned would call unsupported
+        if IV.verifyPinned(alg: s["alg"], identity: signer, artifactPqPk: s["pq_pk"], msg: msg, sig: s["sig"], pqSig: s["pq_sig"], pin: pin) != .valid {
+            return (false, "session root signature invalid")
         }
         return (true, "")
     }

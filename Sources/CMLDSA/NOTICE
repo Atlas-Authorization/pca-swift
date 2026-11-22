@@ -1,0 +1,19 @@
+CMLDSA: third-party code in this directory
+
+ML-DSA-65 and ML-DSA-87 (ml_dsa_65/, ml_dsa_87/)
+  The pq-crystals "standard" reference implementation of ML-DSA (FIPS 204) as shipped in liboqs 0.14.0
+  (src/sig/ml_dsa/pqcrystals-dilithium-standard_ml-dsa-{65,87}_ref). Licensed CC0 1.0 or Apache-2.0; see LICENSE-pqcrystals-dilithium.
+  Changes: config.h fixes the parameter set (DILITHIUM_MODE 3 / 5) instead of reading it from the build, and its exported names are prefixed
+  cmldsa_; sign.h drops liboqs' <oqs/oqs.h> include and OQS_API marker.
+
+Keccak-p[1600] (keccak/)
+  The XKCP generic 64-bit implementation as shipped in liboqs 0.14.0 (src/common/sha3/xkcp_low/KeccakP-1600/plain-64bits), by Guido Bertoni,
+  Joan Daemen, Michael Peeters, Gilles Van Assche and Ronny Van Keer. CC0 1.0 (public domain dedication, stated in each file).
+  Change: KeccakP-1600-SnP.h prefixes every exported function with cmldsa_.
+
+cmldsa_sha3.c
+  The SHAKE sponge of liboqs 0.14.0 (src/common/sha3/xkcp_sha3.c, from PQClean's fips202.c) without the runtime dispatch and the heap allocation.
+
+liboqs
+  liboqs is MIT licensed; the license text is LICENSE-liboqs. cmldsa.c, cmldsa_random.c and the headers in glue/ and include/
+  are this package's own code.

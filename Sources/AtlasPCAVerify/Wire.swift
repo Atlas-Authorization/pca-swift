@@ -3,7 +3,7 @@ import Foundation
 /// Wire-format v2 validation (README §1/3/5), mirroring `wire.ts` / the Rust `validate_wire`: closed field
 /// sets, presence, JSON types, safe integers, canonical fixed-length base64url, and that the whole signed
 /// body admits the strict canonical encoding. Returns nil when well-formed, else a short reason.
-enum Wire {
+public enum Wire {
     static let REQUIRED_FIELDS = [
         "ver", "action", "grant_ref", "cap_chain", "plan", "attestation", "provenance", "freshness",
         "counter", "risk_claim", "aud", "iat", "exp", "sig",
@@ -17,9 +17,11 @@ enum Wire {
         "intent",
         // Intent Layer v2 (additive, SIGNED): the session member (IntentSession.swift, rule 13).
         "intent_session",
+        // Consistency token (additive, SIGNED): the `fresh_at` member (FreshAt.swift).
+        "fresh_at",
     ]
-    static let MAX_AUD_LEN = 256
-    static let MAX_NONCE_LEN = 128
+    public static let MAX_AUD_LEN = 256
+    public static let MAX_NONCE_LEN = 128
 
     private static func b32(_ v: JSONValue?) -> Bool {
         guard let s = v?.asString else { return false }
@@ -29,13 +31,13 @@ enum Wire {
     private static func isInt(_ v: JSONValue?) -> Bool { v?.safeInt != nil }
 
     private static func closed(_ o: JObject, _ allowed: [String], _ label: String) -> String? {
-        for k in o.keys where !allowed.contains(where: { JKey($0) == k }) { return "unknown field '\(label)\(k.s)'" }
+        for k in JS.keyOrder(o) where !allowed.contains(where: { JKey($0) == k }) { return "unknown field '\(label)\(k.s)'" }
         return nil
     }
 
     static func validate(_ pcactn: JSONValue) -> String? {
         guard let p = pcactn.asObject else { return "PCActn is not an object" }
-        for k in p.keys where !REQUIRED_FIELDS.contains(where: { JKey($0) == k }) && !OPTIONAL_FIELDS.contains(where: { JKey($0) == k }) {
+        for k in JS.keyOrder(p) where !REQUIRED_FIELDS.contains(where: { JKey($0) == k }) && !OPTIONAL_FIELDS.contains(where: { JKey($0) == k }) {
             return "unknown field '\(k.s)'"
         }
         for k in REQUIRED_FIELDS where p[JKey(k)] == nil { return "missing field '\(k)'" }
@@ -83,7 +85,7 @@ enum Wire {
         guard let path = ip["path"]?.asArray else { return "'plan.inclusion_proof.path' must be an array" }
         for (i, st) in path.enumerated() {
             guard let st = st.asObject else { return "proof step \(i) must be an object" }
-            for k in st.keys where k != "side" && k != "hash" { return "unknown field 'path[\(i)].\(k)'" }
+            for k in JS.keyOrder(st) where k != "side" && k != "hash" { return "unknown field 'path[\(i)].\(k.s)'" }
             switch st["side"]?.asString {
             case "L", "R": break
             default: return "proof step \(i): side must be 'L' or 'R'"
@@ -144,6 +146,7 @@ enum Wire {
         if let v = p["progress_step"], !v.isObject { return "'progress_step' must be an object" }
         if let v = p["intent"], let e = Intent.validateWire(v) { return e }
         if let v = p["intent_session"], let e = IntentSession.validateWire(v) { return e }
+        if let v = p["fresh_at"], let e = FreshAt.validateWire(v) { return e }
         if let v = p["prohibition_evidence"], !v.isObject && !v.isArray { return "'prohibition_evidence' must be an object or array" }
         if let th = p["threshold"] {
             guard let shares = th.asObject?["shares"]?.asArray else { return "'threshold' must be {shares:[...]}" }

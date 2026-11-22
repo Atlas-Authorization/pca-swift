@@ -1,0 +1,61 @@
+name: FHE (BFV on Microsoft SEAL)
+
+# AtlasPCAFhe: the homomorphic risk gate through a C target (CSealC) over Microsoft SEAL's own C export API (libsealc, built here from the pinned SEAL
+# tag into Sources/CSealC/lib; without it Package.swift leaves the product out). Wire compatibility with the TypeScript reference (node-seal 5.1.7 =
+# SEAL 4.1.2) is shown by replaying a corpus generated here by the reference: the native evaluator must reproduce the reference's evaluated
+# ciphertexts byte for byte (re-saved uncompressed). macOS because the package's verify target needs Xcode 26 CryptoKit.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SEAL_TAG: v4.1.2
+
+jobs:
+  fhe:
+    name: swift test AtlasPCAFhe (macos)
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Source layout (full shared corpus from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: Vendored SEAL, zlib, zstd and GSL (pinned commits; the package leaves the product out without them)
+        shell: bash
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: $GITHUB_WORKSPACE/.github/scripts/vendor-natives.sh seal
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: node-seal reference corpus
+        run: .github/scripts/fhe-seal-corpus.sh "$RUNNER_TEMP/fhe-seal.json.gz"
+      - name: libsealc at the pinned SEAL tag, into the C target
+        run: |
+          dir="$(.github/scripts/build-libsealc.sh "$SEAL_TAG" "$RUNNER_TEMP/seal")"
+          mkdir -p "$PCA_MONO_SDK/Sources/CSealC/lib"
+          cp -a "$dir"/libsealc* "$PCA_MONO_SDK/Sources/CSealC/lib/"
+          test -e "$PCA_MONO_SDK/Sources/CSealC/lib/libsealc.dylib"
+      - name: Build
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift build --product AtlasPCAFhe
+      - name: BFV replay and round trip
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        env:
+          PCA_FHE_SEAL_REQUIRED: '1'
+          PCA_FHE_SEAL_CORPUS: ${{ runner.temp }}/fhe-seal.json.gz
+        run: swift test --filter AtlasPCAFheTests

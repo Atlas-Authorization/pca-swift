@@ -1,0 +1,85 @@
+name: Native packaging smoke
+
+# A consumer package on a clean runner depends on the package the way a user does (a tagged repository, no checkout tree on any path, no environment variables)
+# and calls one function of every product that ships a native piece: blst (pairing), SEAL (FHE key generation), the lattice and FN-DSA cores, LESS.
+# It also asserts ML-DSA-65 and ML-DSA-87 keygen and the suite registry work with no setup (the vendored CMLDSA target; the macOS runner image is below OS 26,
+# so there CryptoKit has none and the vendored code is what runs).
+# A product whose native inputs are not in the package yet is not declared, so its lines are skipped here (the product list comes from the package itself).
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PCA_REQUIRE_PQ: '1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: consumer smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        if: runner.os == 'macOS'
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Linux toolchain (Swift, swift-crypto for CryptoKit)
+        if: runner.os == 'Linux'
+        run: |
+          .github/scripts/mutation-layout.sh swift-pca
+          MONO="$RUNNER_TEMP/pca-flagship" # the layout script exports it to later steps only
+          cd "$MONO"
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+          echo "SWIFT_DIR=$MONO/sdks/swift-pca" >> "$GITHUB_ENV"
+      - name: Publish the package as a tagged repository
+        shell: bash
+        run: |
+          src="${SWIFT_DIR:-$PWD}"
+          mkdir -p "$RUNNER_TEMP/AtlasPCA" && cp -R "$src"/. "$RUNNER_TEMP/AtlasPCA/"
+          cd "$RUNNER_TEMP/AtlasPCA" && rm -rf .git .build
+          git init -q && git add -A && git -c user.name=ci -c user.email=ci@example.invalid commit -q -m smoke && git tag 9.9.9
+      - name: Consumer imports and calls each native product
+        shell: bash
+        run: |
+          pkg="$RUNNER_TEMP/AtlasPCA"; app="$RUNNER_TEMP/consumer"
+          prods="$(cd "$pkg" && swift package dump-package | python3 -c 'import json,sys;print(" ".join(p["name"] for p in json.load(sys.stdin)["products"]))')"
+          has() { [[ " $prods " == *" $1 "* ]]; }
+          mkdir -p "$app/Sources/smoke" && cd "$app"
+          deps=""; code="import AtlasPCAVerify\n"
+          # ML-DSA with no extra install: both levels key, the capability manifest lists every ML-DSA suite
+          code="${code}precondition(PCAPQKey.signingAvailable)\nlet k65 = try PCAPQKey.generate(.mlDsa65)\nlet k87 = try PCAPQKey.generate(.mlDsa87)\nlet kSeed = try PCAPQKey.fromSeed(.mlDsa65, seed: [UInt8](repeating: 7, count: 32))\nprecondition(k65.pk.count == 1952 && k87.pk.count == 2592 && kSeed.pk.count == 1952)\n"
+          code="${code}for a in [\"ml-dsa-65\", \"ml-dsa-87\", \"hybrid-ed25519-ml-dsa-65\", \"hybrid-ed25519-ml-dsa-87\"] { precondition(PCASuites.supported.contains(a), a) }\n"
+          add() { deps="$deps .product(name: \"$1\", package: \"AtlasPCA\"),"; code="${code}import $1\n"; }
+          has AtlasPCAPairing && { add AtlasPCAPairing; code="${code}precondition(!Gt.isElement([]))\n"; }
+          has AtlasPCAFhe && { add AtlasPCAFhe; code="${code}let fheKeys = try FheSeal.keygen()\nprecondition(fheKeys.publicKey.count > 0)\n"; }
+          has AtlasPCALweOt && { add AtlasPCALweOt; code="${code}precondition(LweLattice.sizesMatch())\n"; }
+          has AtlasPCAFnDsa && { add AtlasPCAFnDsa; code="${code}precondition(FnDsaNative.sizesMatch())\n"; }
+          has AtlasPCALess && { add AtlasPCALess; code="${code}try LessNative.registerCoreSuites()\n"; }
+          dep="$(printf '.package(url: "file://%s", exact: "9.9.9")' "$pkg")"
+          printf '// swift-tools-version:6.2\nimport PackageDescription\nlet package = Package(name: "consumer", platforms: [.macOS(.v13)], dependencies: [%s], targets: [.executableTarget(name: "smoke", dependencies: [.product(name: "AtlasPCAVerify", package: "AtlasPCA"),%s], path: "Sources/smoke")])\n' "$dep" "$deps" > Package.swift
+          printf "$code"'print("native smoke ok")\n' > Sources/smoke/main.swift
+          # swift-crypto is added by the Linux prep: show whether it resolves in the package itself and is reachable at all
+          if [ "$RUNNER_OS" = Linux ]; then
+            git ls-remote --tags https://github.com/apple/swift-crypto.git 2>&1 | tail -2 || true
+            (cd "$pkg" && swift package resolve 2>&1 | tail -15) || true
+            grep -n "swift-crypto\|swift-tools-version" "$pkg/Package.swift" | head
+          fi
+          # a resolution failure names only the unresolved package: print the resolver's own account of it before failing
+          env -i PATH="$PATH" HOME="$HOME" swift package resolve -v || { echo "::group::resolver detail"; env -i PATH="$PATH" HOME="$HOME" swift package resolve -vv 2>&1 | tail -60; env -i PATH="$PATH" HOME="$HOME" swift package show-dependencies 2>&1 | tail -30; (cd "$pkg" && git show 9.9.9:Package.swift | tail -22); echo "::endgroup::"; exit 1; }
+          env -i PATH="$PATH" HOME="$HOME" swift run smoke

@@ -10,7 +10,7 @@ import Foundation
 extension PCA {
     /// The caveat type `readEnvelope` reads (evaluated separately by the full verifier, never as a caveat here).
     public static let ENVELOPE_CAVEAT = "envelope"
-    static let REVERSIBILITY_ORDER = ["reversible", "rate_limited", "irreversible"]
+    public static let REVERSIBILITY_ORDER = ["reversible", "rate_limited", "irreversible"]
 
     /// Every caveat the policy layer evaluates for an action under `grant` delegated along `chain` (root first): the grant's
     /// `caveats` without its FIRST `envelope` caveat (order kept), then the caveats the hops appended (the last chain
@@ -21,8 +21,8 @@ extension PCA {
         guard let cs = csv.asArray else { return csv }
         var out = cs
         if let i = cs.firstIndex(where: { sameString($0.asObject?[JKey("type")], ENVELOPE_CAVEAT) }) { out.remove(at: i) }
-        if let leaf = chain?.asArray?.last, let lc = leaf.asObject?[JKey("caveats")]?.asArray, lc.count > cs.count {
-            out += lc[cs.count...]
+        if let leaf = chain?.asArray?.last, let lc = leaf.asObject?[JKey("caveats")]?.asArray {
+            out += lc.dropFirst(cs.count)
         }
         return .array(out)
     }
