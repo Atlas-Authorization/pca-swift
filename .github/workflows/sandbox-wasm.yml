@@ -1,0 +1,38 @@
+name: Sandbox WebAssembly hosts
+
+# AtlasPCAWasm (opt-in, ATLAS_PCA_WASMKIT=1): WasmKit core-module host; the subprocess hosts are in AtlasPCAVerify. Runs against the real reference host (pca-wasmtime-host, built here from the flagship's crate and pinned by its SHA-256):
+# CI=true makes the real-host tests FAIL when PCA_WASMTIME_HOST_BIN / PCA_WASMTIME_HOST_SHA256 are missing, so a green run never skips them.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-wasm:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source layout (shared corpus and the reference host crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: Select the newest Xcode 26 (WasmKit 0.4.2 needs a Swift 6.3 toolchain and macOS 15)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: pca-wasmtime-host (cargo build --release; exports PCA_WASMTIME_HOST_BIN and PCA_WASMTIME_HOST_SHA256)
+        run: .github/scripts/build-wasmtime-host.sh "$RUNNER_TEMP/wasmtime-host" "$RUNNER_TEMP/mono/packages/pca-sandbox/wasmtime-host"
+      - name: Sandbox host tests (WasmKit on, real host)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        env:
+          ATLAS_PCA_WASMKIT: '1'
+        run: swift test --filter "RefSandboxHostTests|SandboxWasmTests"

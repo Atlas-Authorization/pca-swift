@@ -1,0 +1,94 @@
+name: Native vendoring
+
+# The package ships its C/C++ natives as source: blst (pairing), Microsoft SEAL with zlib, zstd and GSL (FHE). Sources/vendored.sha256 records every
+# vendored file. Dispatch this workflow to refetch the pinned upstream tags (blst is checked against its commit) into a tree you commit as is;
+# on every push it verifies the committed tree against the record and builds the products that need it on macOS and Linux. A push to a ci/ branch (build or release candidate)
+# refetches first and builds from the fresh tree, and the run summary lists the exact paths to commit from the uploaded artifact.
+on:
+  push:
+    branches: [main, 'ci/**', 'ci/build-**']
+    tags: ['*']
+  workflow_dispatch:
+    inputs:
+      refetch:
+        description: 'Fetch the pinned upstream sources and upload them as an artifact'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  refetch:
+    if: ${{ inputs.refetch || startsWith(github.ref, 'refs/heads/ci/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/scripts/vendor-natives.sh all
+      - name: What to commit
+        run: |
+          {
+            echo "### Vendored natives"
+            echo "Download the \`vendored-natives\` artifact and commit these paths under \`sdks/swift-pca\` (the artifact keeps the layout):"
+            echo '- `Sources/CBlst/blst/` and `Sources/CBlst/include/blst.h`, `Sources/CBlst/include/blst_aux.h`'
+            echo '- `Sources/CSealC/vendor/`'
+            echo '- `Sources/vendored.sha256`'
+            echo "Files recorded: $(wc -l < Sources/vendored.sha256)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vendored-natives
+          path: |
+            Sources/CBlst/blst
+            Sources/CBlst/include/blst.h
+            Sources/CBlst/include/blst_aux.h
+            Sources/CSealC/vendor
+            Sources/vendored.sha256
+
+  verify-build:
+    needs: refetch
+    if: ${{ !cancelled() && (needs.refetch.result == 'success' || needs.refetch.result == 'skipped') }}
+    name: vendored tree and build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fresh vendored tree from the refetch job
+        if: needs.refetch.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: vendored-natives
+          path: ${{ github.workspace }}/Sources # the artifact's root is the common ancestor of the uploaded paths, Sources/
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        if: runner.os == 'macOS'
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Linux toolchain (Swift, swift-crypto for CryptoKit)
+        if: runner.os == 'Linux'
+        run: |
+          .github/scripts/mutation-layout.sh swift-pca
+          MONO="$RUNNER_TEMP/pca-flagship" # the layout script exports it to later steps only
+          [ "${{ needs.refetch.result }}" = success ] && cp -R Sources/. "$MONO/sdks/swift-pca/Sources/" # the freshly fetched tree
+          cd "$MONO"
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+          echo "SWIFT_DIR=$MONO/sdks/swift-pca" >> "$GITHUB_ENV"
+      - name: Vendored files match the record
+        working-directory: ${{ env.SWIFT_DIR || '.' }}
+        run: |
+          test -s Sources/vendored.sha256 || { echo "::error::nothing vendored yet: dispatch this workflow with refetch"; exit 1; }
+          shasum -a 256 -c Sources/vendored.sha256 >/dev/null
+      - name: Build the vendored products
+        working-directory: ${{ env.SWIFT_DIR || '.' }}
+        run: swift build --product AtlasPCAPairing --product AtlasPCAFhe

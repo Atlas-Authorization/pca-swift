@@ -1,0 +1,42 @@
+[
+ {
+  "file": "Sources/AtlasPCAFnDsa/FnDsaSurface.swift",
+  "reason": "one static constant aliasing another (the reference export name): no condition, arithmetic or call to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCALweOt/EndemicSurface.swift",
+  "reason": "one global constant aliasing another (the reference export name): no condition, arithmetic or call to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCAMpc/MpcJson.swift",
+  "reason": "pattern-match accessors over the JSONValue cases: no condition, arithmetic or literal to mutate; every wire test reads through them"
+ },
+ {
+  "file": "Sources/AtlasPCAPairing/SurfaceAliases.swift",
+  "reason": "typealias and constants aliasing other declarations (the reference export names): no condition, arithmetic or call to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCAStepUp/StepUpError.swift",
+  "reason": "Error enum and a switch with one fixed message per case: no condition, arithmetic or call to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/CatalogBuiltin.swift",
+  "reason": "generated data: the reference built-in action catalog as one array literal of string, number and boolean fields (no condition, arithmetic or call to mutate); a test compares every entry with the reference catalog file"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/ComplianceControls.swift",
+  "reason": "the control-mapping table: string literals and string arrays only (no condition, arithmetic or number to mutate); tests compare every control id and field with the reference report"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/ImportRulesData.swift",
+  "reason": "generated data: the shipped suggestion rule set as one JSON string literal and its sealed digest (no condition, arithmetic or call to mutate); a test replays every rule against the reference and checks the sealed digest"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/IntentMath.swift",
+  "reason": "one forwarding call to FdLibm.log2 (mutated in its own file): no condition, arithmetic or literal to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/SurfaceAliases6.swift",
+  "reason": "typealias and a forwarding function (the reference export names): no condition, arithmetic or literal to mutate"
+ }
+]

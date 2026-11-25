@@ -1,0 +1,53 @@
+name: ZK (libpcazk)
+
+# AtlasPCAZk: Groth16 verification and proving (arkworks) behind a small C library (libpcazk), built here from the flagship's crate into the C target.
+# Replays the verification cases of the reference corpus (BN254 and BLS12-381) in the default and the strict mode, then the whole zk corpus
+# (1429 cases) through the core zk module with this library registered as its Groth16 engine: with the library present the verifier tests
+# link it, so no case is left to the pairing check. The one prove case needs the circuit's witness program and proving key (development
+# builds that are not in the repository); it runs when PCA_ZK_POLICYVM_WASM and PCA_ZK_POLICYVM_ZKEY name them and is listed otherwise.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zk:
+    name: swift test AtlasPCAZk (macos)
+    runs-on: macos-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Source layout (full shared corpus and the zk crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: libpcazk into the C target
+        run: |
+          dir="$(.github/scripts/build-libpcazk.sh "$RUNNER_TEMP/pcazk" "$RUNNER_TEMP/mono/packages/pca-zk/crate" | tail -1)"
+          mkdir -p "$PCA_MONO_SDK/Sources/CPcaZk/lib"
+          cp "$dir"/libpcazk.* "$PCA_MONO_SDK/Sources/CPcaZk/lib/"
+          # the shared library name must be what the linker asks for (-lpcazk) and what the loader finds through the rpath
+          test -e "$PCA_MONO_SDK/Sources/CPcaZk/lib/libpcazk.dylib"
+          install_name_tool -id "@rpath/libpcazk.dylib" "$PCA_MONO_SDK/Sources/CPcaZk/lib/libpcazk.dylib"
+          diff "$dir/pca_zk.h" "$PCA_MONO_SDK/Sources/CPcaZk/include/CPcaZk.h"
+      - name: Build
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift build --product AtlasPCAZk
+      - name: Verification replay
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift test --filter AtlasPCAZkTests
+      - name: Core zk module, the full corpus through the library (envelope gate, pins, backends, statements, ceremony checks, pairing)
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift test --filter RefZkTests

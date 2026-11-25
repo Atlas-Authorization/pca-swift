@@ -1,0 +1,68 @@
+name: Native libraries (static)
+
+# AtlasPCALweOt and AtlasPCAFnDsa sit on Rust cores. A Rust crate cannot be a SwiftPM source target, so the package ships each core as a prebuilt static library
+# per platform (Sources/CLweOt/lib/<os>-<arch>/liblweot.a, Sources/CFnDsa/lib/<os>-<arch>/libfndsa.a). C ports of the two primitives were not chosen: nothing shows
+# a port is byte for byte the pinned crate versions the corpora were generated with. Each runner builds its own platform; the artifacts are committed as they are.
+# macOS x86-64 uses the Intel runner, so a universal build needs both archives in place (Package.swift links the one for the building host's architecture).
+on:
+  push:
+    branches: [main, 'ci/**', 'ci/build-**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: static cores (${{ matrix.plat }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, plat: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, plat: linux-arm64 }
+          - { os: macos-15-intel, plat: macos-x86_64 }
+          - { os: macos-latest, plat: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flagship checkout (the crates)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: liblweot.a and libfndsa.a
+        shell: bash
+        env:
+          PCA_STATIC: '1'
+        run: |
+          out="$PCA_MONO_SDK/Sources"
+          d="$(.github/scripts/build-liblweot.sh "$RUNNER_TEMP/lweot" "$RUNNER_TEMP/mono/packages/pca-mpc-lwe-ot-wasm/crate" | tail -1)"
+          mkdir -p "$out/CLweOt/lib/${{ matrix.plat }}"; cp "$d/liblweot.a" "$out/CLweOt/lib/${{ matrix.plat }}/"; diff "$d/pca_lwe_ot.h" "$out/CLweOt/include/CLweOt.h"
+          d="$(.github/scripts/build-libfndsa.sh "$RUNNER_TEMP/fndsa" "$RUNNER_TEMP/mono/packages/pca-fndsa-wasm/crate" | tail -1)"
+          mkdir -p "$out/CFnDsa/lib/${{ matrix.plat }}"; cp "$d/libfndsa.a" "$out/CFnDsa/lib/${{ matrix.plat }}/"; diff "$d/pca_fndsa.h" "$out/CFnDsa/include/CFnDsa.h"
+          d="$(.github/scripts/build-libpcazk.sh "$RUNNER_TEMP/pcazk" "$RUNNER_TEMP/mono/packages/pca-zk/crate" | tail -1)"
+          mkdir -p "$out/CPcaZk/lib/${{ matrix.plat }}"; cp "$d/libpcazk.a" "$out/CPcaZk/lib/${{ matrix.plat }}/"; diff "$d/pca_zk.h" "$out/CPcaZk/include/CPcaZk.h"
+          test -s "$out/CLweOt/lib/${{ matrix.plat }}/liblweot.a" && test -s "$out/CFnDsa/lib/${{ matrix.plat }}/libfndsa.a" && test -s "$out/CPcaZk/lib/${{ matrix.plat }}/libpcazk.a"
+      - name: What to commit
+        shell: bash
+        run: |
+          {
+            echo "### Static cores for ${{ matrix.plat }}"
+            echo "Download the \`static-cores-${{ matrix.plat }}\` artifact and commit, under \`sdks/swift-pca\`:"
+            echo '- `Sources/CLweOt/lib/${{ matrix.plat }}/liblweot.a`'
+            echo '- `Sources/CFnDsa/lib/${{ matrix.plat }}/libfndsa.a`'
+            echo '- `Sources/CPcaZk/lib/${{ matrix.plat }}/libpcazk.a`'
+            echo "Sizes: $(du -h "$PCA_MONO_SDK"/Sources/CLweOt/lib/${{ matrix.plat }}/*.a "$PCA_MONO_SDK"/Sources/CFnDsa/lib/${{ matrix.plat }}/*.a | tr '\t\n' '  ')"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-cores-${{ matrix.plat }}
+          path: |
+            ${{ env.PCA_MONO_SDK }}/Sources/CLweOt/lib/${{ matrix.plat }}
+            ${{ env.PCA_MONO_SDK }}/Sources/CFnDsa/lib/${{ matrix.plat }}
+            ${{ env.PCA_MONO_SDK }}/Sources/CPcaZk/lib/${{ matrix.plat }}

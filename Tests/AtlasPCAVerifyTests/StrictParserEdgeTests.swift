@@ -318,7 +318,7 @@ final class StrictParserEdgeTests: XCTestCase {
             XCTAssertEqual(err("{", lenient: lenient), "strict JSON: expected a string key (at offset 1)")
             XCTAssertEqual(err("{\"a\"", lenient: lenient), "strict JSON: expected \":\" (at offset 4)")
             XCTAssertEqual(err("{\"a\":1", lenient: lenient), "strict JSON: expected \",\" or \"}\" (at offset 6)")
-            XCTAssertEqual(err("{\"a\":1,\"a\":2}", lenient: lenient), "strict JSON: duplicate key (at offset 10)")
+            XCTAssertEqual(err("{\"a\":1,\"a\":2}", lenient: lenient), "strict JSON: duplicate key \"a\" (at offset 10)")
         }
     }
 

@@ -1,0 +1,218 @@
+[
+ {
+  "path": "Sources/CAda/ada_shim.cpp",
+  "kind": "mutated",
+  "target": "ada_shim"
+ },
+ {
+  "path": "Sources/CAda/ada.cpp",
+  "kind": "vendored",
+  "reason": "Ada's pinned single-file release (SHA-256 checked by the ada workflow); upstream code, not ours"
+ },
+ {
+  "path": "Sources/CAda/ada.h",
+  "kind": "vendored",
+  "reason": "Ada's pinned single-file release (SHA-256 checked by the ada workflow); upstream code, not ours"
+ },
+ {
+  "path": "Sources/CAda/include/CAda.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CBlst/pca_gt.c",
+  "kind": "mutated",
+  "target": "pca_gt"
+ },
+ {
+  "path": "Sources/CBlst/blst/",
+  "kind": "vendored",
+  "reason": "supranational blst at the pinned commit, cloned by the pairing workflow; upstream code, not checked in",
+  "optional": true
+ },
+ {
+  "path": "Sources/CBlst/include/blst.h",
+  "kind": "vendored",
+  "reason": "blst's unmodified public header, copied by the pairing workflow",
+  "optional": true
+ },
+ {
+  "path": "Sources/CBlst/include/blst_aux.h",
+  "kind": "vendored",
+  "reason": "blst's unmodified public header, copied by the pairing workflow",
+  "optional": true
+ },
+ {
+  "path": "Sources/CBlst/include/pca_gt.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CBlst/include/module.modulemap",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CBlst/.gitignore",
+  "kind": "no-logic",
+  "reason": "ignore list of the downloaded blst tree"
+ },
+ {
+  "path": "Sources/CSealC/csealc.c",
+  "kind": "no-logic",
+  "reason": "a one-line include of the library's header: it contains no logic"
+ },
+ {
+  "path": "Sources/CSealC/include/CSealC.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CSealC/lib/",
+  "kind": "vendored",
+  "reason": "the native library built from the flagship's crate by the workflow, not checked in",
+  "optional": true
+ },
+ {
+  "path": "Sources/CLweOt/lweot.c",
+  "kind": "no-logic",
+  "reason": "a one-line include of the library's header: it contains no logic"
+ },
+ {
+  "path": "Sources/CLweOt/include/CLweOt.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CLweOt/lib/",
+  "kind": "vendored",
+  "reason": "the native library built from the flagship's crate by the workflow, not checked in",
+  "optional": true
+ },
+ {
+  "path": "Sources/CFnDsa/fndsa.c",
+  "kind": "no-logic",
+  "reason": "a one-line include of the library's header: it contains no logic"
+ },
+ {
+  "path": "Sources/CFnDsa/include/CFnDsa.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CFnDsa/lib/",
+  "kind": "vendored",
+  "reason": "the native library built from the flagship's crate by the workflow, not checked in",
+  "optional": true
+ },
+ {
+  "path": "Sources/CLess/atlas_less.c",
+  "kind": "mutated",
+  "target": "atlas_less"
+ },
+ {
+  "path": "Sources/CLess/lib/",
+  "kind": "vendored",
+  "reason": "the LESS reference implementation, a copy kept identical to the canonical one by sync.sh --check; upstream code, not ours"
+ },
+ {
+  "path": "Sources/CLess/ref/",
+  "kind": "vendored",
+  "reason": "the LESS reference headers, a copy kept identical to the canonical one by sync.sh --check; upstream code, not ours"
+ },
+ {
+  "path": "Sources/CLess/include/",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CLess/LICENSE",
+  "kind": "no-logic",
+  "reason": "licence text"
+ },
+ {
+  "path": "Sources/CLess/sync.sh",
+  "kind": "no-logic",
+  "reason": "the script that refreshes the vendored copy: not shipped code and not part of any build"
+ },
+ {
+  "path": "Sources/CLibcrypto/",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CSQLite3/",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CSodium/",
+  "kind": "vendored",
+  "reason": "libsodium 1.0.20 as released upstream (SHA-256 pinned), built from source on Linux; upstream code, not ours"
+ },
+ {
+  "path": "Sources/CMLDSA/cmldsa.c",
+  "kind": "mutated",
+  "target": "cmldsa"
+ },
+ {
+  "path": "Sources/CMLDSA/cmldsa_random.c",
+  "kind": "mutated",
+  "target": "cmldsa_random"
+ },
+ {
+  "path": "Sources/CMLDSA/cmldsa_sha3.c",
+  "kind": "vendored",
+  "reason": "liboqs 0.14.0's xkcp_sha3.c sponge (MIT) with the runtime dispatch and heap allocation removed; every ML-DSA known-answer vector runs through it"
+ },
+ {
+  "path": "Sources/CMLDSA/ml_dsa_65/",
+  "kind": "vendored",
+  "reason": "liboqs 0.14.0's pq-crystals ML-DSA reference code, vendored (SHA-256 recorded in Sources/CMLDSA/vendored.sha256, checked by the cmldsa workflow); upstream code, not ours"
+ },
+ {
+  "path": "Sources/CMLDSA/ml_dsa_87/",
+  "kind": "vendored",
+  "reason": "liboqs 0.14.0's pq-crystals ML-DSA reference code, vendored (SHA-256 recorded in Sources/CMLDSA/vendored.sha256, checked by the cmldsa workflow); upstream code, not ours"
+ },
+ {
+  "path": "Sources/CMLDSA/keccak/",
+  "kind": "vendored",
+  "reason": "XKCP generic 64-bit Keccak-p[1600] as liboqs 0.14.0 ships it (CC0), with its exported names prefixed; upstream code, not ours"
+ },
+ {
+  "path": "Sources/CMLDSA/include/cmldsa.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CMLDSA/glue/fips202.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CMLDSA/glue/randombytes.h",
+  "kind": "no-logic",
+  "reason": "declarations only (a header or module map): no code to mutate"
+ },
+ {
+  "path": "Sources/CMLDSA/LICENSE-liboqs",
+  "kind": "no-logic",
+  "reason": "upstream license text"
+ },
+ {
+  "path": "Sources/CMLDSA/LICENSE-pqcrystals-dilithium",
+  "kind": "no-logic",
+  "reason": "upstream license text"
+ },
+ {
+  "path": "Sources/CMLDSA/NOTICE",
+  "kind": "no-logic",
+  "reason": "third-party notice text"
+ },
+ {
+  "path": "Sources/CMLDSA/vendored.sha256",
+  "kind": "no-logic",
+  "reason": "hash list of the vendored files"
+ }
+]

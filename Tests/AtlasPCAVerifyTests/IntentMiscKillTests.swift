@@ -232,12 +232,8 @@ final class IntentMiscKillTests: XCTestCase {
 
     // ---- PQ / MLDSA ----
 
-    func testMLDSAAvailabilityMatchesThePlatform() {
-        if #available(macOS 26.0, iOS 26.0, watchOS 26.0, tvOS 26.0, macCatalyst 26.0, visionOS 26.0, *) {
-            XCTAssertTrue(MLDSA.available)
-        } else {
-            XCTAssertFalse(MLDSA.available)
-        }
+    func testMLDSAIsAvailableOnEveryPlatform() {
+        XCTAssertTrue(MLDSA.available) // CryptoKit on OS 26, the vendored target elsewhere
     }
 
     func testSuiteResolutionFollowsAvailability() {
