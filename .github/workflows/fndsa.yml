@@ -1,0 +1,52 @@
+name: FN-DSA (libfndsa)
+
+# AtlasPCAFnDsa: FN-DSA (Pornin's fn-dsa 0.4.0) behind a small C library (libfndsa), built here from the flagship's crate into the C target.
+# Replays the 480-case reference corpus and the known-answer file.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fndsa:
+    name: swift test AtlasPCAFnDsa (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Source layout (full shared corpus and the FN-DSA crate from the flagship)
+        shell: bash
+        run: .github/scripts/fetch-flagship-corpus.sh --mono swift-pca
+      - name: libfndsa into the C target
+        run: |
+          dir="$(.github/scripts/build-libfndsa.sh "$RUNNER_TEMP/fndsa" "$RUNNER_TEMP/mono/packages/pca-fndsa-wasm/crate" | tail -1)"
+          mkdir -p "$PCA_MONO_SDK/Sources/CFnDsa/lib"
+          cp "$dir"/libfndsa.* "$PCA_MONO_SDK/Sources/CFnDsa/lib/"
+          # the shared library name must be what the linker asks for (-lfndsa) and what the loader finds through the rpath
+          test -e "$PCA_MONO_SDK/Sources/CFnDsa/lib/libfndsa.dylib"
+          install_name_tool -id "@rpath/libfndsa.dylib" "$PCA_MONO_SDK/Sources/CFnDsa/lib/libfndsa.dylib"
+          diff "$dir/pca_fndsa.h" "$PCA_MONO_SDK/Sources/CFnDsa/include/CFnDsa.h"
+      - name: Build
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        run: swift build --product AtlasPCAFnDsa
+      - name: FN-DSA replay
+        working-directory: ${{ env.PCA_MONO_SDK }}
+        env:
+          ATLAS_PCA_LIBFNDSA_REQUIRED: '1'
+        run: |
+          swift test --filter AtlasPCAFnDsaTests
+          swift test --filter FnDsaCoreSuiteTests
+          swift test --filter FnDsaSettlementDenyTests

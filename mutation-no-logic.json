@@ -1,0 +1,14 @@
+[
+ {
+  "file": "Sources/AtlasPCAStepUp/StepUpError.swift",
+  "reason": "Error enum and a switch with one fixed message per case: no condition, arithmetic or call to mutate"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/CatalogBuiltin.swift",
+  "reason": "generated data: the reference built-in action catalog as one array literal of string, number and boolean fields (no condition, arithmetic or call to mutate); a test compares every entry with the reference catalog file"
+ },
+ {
+  "file": "Sources/AtlasPCAVerify/Goal/GoalOntologiesData.swift",
+  "reason": "generated data: the shipped goal ontologies as string literals of JSON (no condition, arithmetic or call to mutate); a test replays every ontology function against the reference over the same data"
+ }
+]

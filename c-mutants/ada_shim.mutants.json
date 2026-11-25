@@ -1,0 +1,114 @@
+[
+ {
+  "id": "null-input",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": "input == nullptr",
+  "to": "input != nullptr",
+  "what": "non-null input refused"
+ },
+ {
+  "id": "drop-input",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": "input == nullptr || ",
+  "to": "",
+  "what": "null input not refused"
+ },
+ {
+  "id": "drop-out",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": " out == nullptr ||",
+  "to": "",
+  "what": "null output not refused"
+ },
+ {
+  "id": "drop-outlen",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": " out_len == nullptr ||",
+  "to": "",
+  "what": "null length pointer not refused"
+ },
+ {
+  "id": "empty-input",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": "input_len == 0",
+  "to": "input_len == 1",
+  "what": "one-byte input refused"
+ },
+ {
+  "id": "drop-empty",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": " || input_len == 0",
+  "to": "",
+  "what": "empty input not refused"
+ },
+ {
+  "id": "refuse-ret",
+  "line": "  if (input == nullptr || out == nullptr || out_len == nullptr || input_len == 0) return 0;",
+  "from": "return 0",
+  "to": "return 1",
+  "what": "refused input reported as success"
+ },
+ {
+  "id": "parse-null",
+  "line": "  if (!url) return 0;",
+  "from": "!url",
+  "to": "url",
+  "what": "parser failure ignored"
+ },
+ {
+  "id": "host-refused",
+  "line": "  if (!url->set_hostname(std::string_view(reinterpret_cast<const char *>(input), input_len))) return 0;",
+  "from": "!url->set_hostname",
+  "to": "url->set_hostname",
+  "what": "refused host accepted, valid host refused"
+ },
+ {
+  "id": "host-len",
+  "line": "  if (!url->set_hostname(std::string_view(reinterpret_cast<const char *>(input), input_len))) return 0;",
+  "from": "input_len)",
+  "to": "input_len - 1)",
+  "what": "last byte of the host dropped"
+ },
+ {
+  "id": "empty-host",
+  "line": "  if (host.empty() || host.size() > cap) return 0;",
+  "from": "host.empty() || ",
+  "to": "",
+  "what": "empty host accepted"
+ },
+ {
+  "id": "cap-gt",
+  "line": "  if (host.empty() || host.size() > cap) return 0;",
+  "from": "host.size() > cap",
+  "to": "host.size() >= cap",
+  "what": "host that exactly fits refused"
+ },
+ {
+  "id": "cap-drop",
+  "line": "  if (host.empty() || host.size() > cap) return 0;",
+  "from": " || host.size() > cap",
+  "to": "",
+  "what": "host past the buffer accepted"
+ },
+ {
+  "id": "memcpy-len",
+  "line": "  std::memcpy(out, host.data(), host.size());",
+  "from": "host.size()",
+  "to": "host.size() - 1",
+  "what": "last byte not copied"
+ },
+ {
+  "id": "outlen",
+  "line": "  *out_len = host.size();",
+  "from": "host.size()",
+  "to": "host.size() + 1",
+  "what": "length one too long"
+ },
+ {
+  "id": "ok-ret",
+  "line": "  return 1;",
+  "from": "return 1",
+  "to": "return 0",
+  "what": "success reported as refusal"
+ }
+]

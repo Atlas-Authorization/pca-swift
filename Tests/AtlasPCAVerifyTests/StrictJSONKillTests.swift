@@ -54,8 +54,10 @@ final class StrictJSONKillTests: XCTestCase {
             XCTAssertEqual(Canonical.canonicalize(.double(d)), s, "\(d)")
             XCTAssertEqual(Canonical.numberString(d), s, "\(d)")
         }
-        // the lenient form does not apply the strict profile
-        XCTAssertEqual(Canonical.canonicalize(.int(Int64.max)), "9223372036854775807")
+        // the lenient form does not apply the strict profile: it is JSON.stringify of a JavaScript number, so an integer past 2^53 is written as its double
+        // (the reference parses 9223372036854775807 to 9223372036854775808 and prints 9223372036854776000; a digest of such a document must match), one inside is exact
+        XCTAssertEqual(Canonical.canonicalize(.int(Int64.max)), "9223372036854776000")
+        XCTAssertEqual(Canonical.canonicalize(.int(9_007_199_254_740_991)), "9007199254740991")
         XCTAssertEqual(Canonical.canonicalize(.array([.double(0.1 + 0.2)])), "[0.30000000000000004]")
         // out-of-profile lenient input is "" (never a shared truncated prefix)
         XCTAssertEqual(Canonical.canonicalize(.array([.int(1), .double(.nan)])), "")
@@ -97,7 +99,7 @@ final class StrictJSONKillTests: XCTestCase {
             }
         }
         // the public entry point: a 100000-deep document is a clean wire deny (no stack overflow)
-        let v = PCA.verify(json: arr(100_000), grant: .object([:]), now: 0, audience: "a")
+        let v = PCA.verify(json: arr(100_000), grant: .object([:]), now: 0, audience: "a", insecureSkipPlanRootCheck: true)
         XCTAssertFalse(v.allow)
         XCTAssertEqual(v.checks, ["wire": false])
         XCTAssertTrue(v.reason.contains("nesting too deep"), v.reason)

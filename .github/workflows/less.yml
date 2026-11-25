@@ -1,0 +1,33 @@
+name: LESS suites
+
+# AtlasPCALess: the LESS-cat1 and hybrid-ed25519-less-cat1 verifiers over the reference C (Sources/CLess, kept in sync by sync.sh). The
+# product is always declared; this job runs the core-suite and known-answer tests.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  less:
+    name: swift test LESS (macos)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      ATLAS_PCA_LESS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: LESS core suites and known answers
+        run: swift test --filter 'LessCoreSuiteTests|LessNativeTests'

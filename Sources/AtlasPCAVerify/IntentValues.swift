@@ -5,18 +5,57 @@ import Foundation
 /// lexeme of the same value are the same number), strings compare by code point (never by Swift's canonical equivalence),
 /// the `^[...]{m,n}$` name patterns are ASCII, and the strict canonical form is the shared `Canonical.canonicalizeStrict`
 /// (a string carrying the lone-surrogate sentinel is refused, like a lone surrogate in the reference).
-enum IV {
+public enum IV {
     static let MAX_SAFE = Double(Canonical.MAX_SAFE)
 
     // ---- numbers ----
 
     /// The binary64 value of a JSON number (`typeof x === 'number'`), else nil.
-    static func num(_ v: JSONValue?) -> Double? {
+    public static func num(_ v: JSONValue?) -> Double? {
         switch v {
         case let .int(i)?: return Double(i)
         case let .double(d)?: return d
         default: return nil
         }
+    }
+
+    /// JS `Number(string)`: NaN outside StringNumericLiteral. `Double(String)` alone is wrong here: it also takes nan, inf and infinity in
+    /// any case, and signed or fractional hex floats, and refuses 0o / 0b.
+    static func jsNumber(_ s: String) -> Double {
+        let t = Array(Attest.jsTrim(s).utf8)
+        if t.isEmpty { return 0 }
+        if t.count >= 2, t[0] == 48, let bits = [UInt8(ascii: "x"): 4, UInt8(ascii: "o"): 3, UInt8(ascii: "b"): 1][t[1] | 0x20] {
+            var bin: [UInt8] = []
+            for c in t[2...] {
+                guard let v = ACrypto.nibble(c), Int(v) < 1 << bits else { return .nan }
+                for b in (0..<bits).reversed() { bin.append((v >> UInt8(b)) & 1) }
+            }
+            if bin.isEmpty { return .nan }
+            bin.insert(contentsOf: [UInt8](repeating: 0, count: (4 - bin.count % 4) % 4), at: 0)
+            // via a hex float: exact rounding above 2^53, Infinity on overflow, as JS
+            var hex = "0x"
+            for k in stride(from: 0, to: bin.count, by: 4) { hex += String(bin[k..<k + 4].reduce(UInt8(0)) { $0 * 2 + $1 }, radix: 16) }
+            return Double(hex) ?? .nan
+        }
+        var i = t[0] == 43 || t[0] == 45 ? 1 : 0
+        if t[i...].elementsEqual("Infinity".utf8) { return t[0] == 45 ? -.infinity : .infinity }
+        func run() -> Int {
+            let from = i
+            while i < t.count, t[i] >= 48, t[i] <= 57 { i += 1 }
+            return i - from
+        }
+        var digits = run()
+        if i < t.count, t[i] == 46 {
+            i += 1
+            digits += run()
+        }
+        if digits == 0 { return .nan }
+        if i < t.count, t[i] | 0x20 == 101 {
+            i += 1
+            if i < t.count, t[i] == 43 || t[i] == 45 { i += 1 }
+            if run() == 0 { return .nan }
+        }
+        return i == t.count ? Double(String(decoding: t, as: UTF8.self)) ?? .nan : .nan
     }
 
     static func isNegZero(_ d: Double) -> Bool { d == 0 && d.sign == .minus }
@@ -70,9 +109,10 @@ enum IV {
     static func split(_ s: String, _ sep: Unicode.Scalar) -> [String] {
         s.unicodeScalars.split(separator: sep, omittingEmptySubsequences: false).map { text(($0)) }
     }
-    static func u8(_ s: String) -> Int { s.utf8.count }
+    /// UTF-8 length as the reference measures it: a lone surrogate encodes as U+FFFD (3 bytes).
+    static func u8(_ s: String) -> Int { s.unicodeScalars.reduce(0) { $0 + (Canonical.loneUnit($1) != nil ? 3 : UTF8.width($1)) } }
     /// UTF-16 length (`s.length`).
-    static func u16(_ s: String) -> Int { s.utf16.count }
+    static func u16(_ s: String) -> Int { s.unicodeScalars.reduce(0) { $0 + (Canonical.loneUnit($1) != nil ? 1 : UTF16.width($1)) } }
 
     /// `isBoundedString`: a non-empty string of at most `max` UTF-8 bytes.
     static func bounded(_ v: JSONValue?, _ max: Int) -> String? {
@@ -203,7 +243,7 @@ enum IV {
 
     /// Normalise a value loaded by the lenient parser to what `JSON.parse` yields: an integer lexeme outside the safe range
     /// becomes the nearest binary64 (a JSON number is a binary64 in every verifier).
-    static func normalized(_ v: JSONValue) -> JSONValue {
+    public static func normalized(_ v: JSONValue) -> JSONValue {
         switch v {
         case let .int(i): return (i >= -Canonical.MAX_SAFE && i <= Canonical.MAX_SAFE) ? v : .double(Double(i))
         case let .array(a): return .array(a.map(normalized))

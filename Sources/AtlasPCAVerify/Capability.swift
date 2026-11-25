@@ -4,13 +4,13 @@ import Foundation
 /// per-hop caveat narrowing (append-only), holder-binding continuity (issuer == parent.holder),
 /// hash-linked parents, root issuer pinning, strict Ed25519 hop signatures, and the 16-hop cap
 /// (enforced before any signature work).
-enum Capability {
+public enum Capability {
     static let CAP_DOMAIN: [UInt8] = Canonical.utf8("atlas-pca/cap/v1") + [0x00]
     static let MAX_CHAIN_DEPTH = 16
     /// Shared hard caveat caps (all PCA verifiers): per-hop cumulative list, and the sum over every hop of a chain.
-    static let MAX_CAVEATS_PER_HOP = 256
-    static let MAX_CAVEATS_PER_CHAIN = 1024
-    static let CAVEAT_LIMIT_REASON = "chain exceeds caveat limit (max \(MAX_CAVEATS_PER_HOP) per hop, \(MAX_CAVEATS_PER_CHAIN) per chain)"
+    public static let MAX_CAVEATS_PER_HOP = 256
+    public static let MAX_CAVEATS_PER_CHAIN = 1024
+    public static let CAVEAT_LIMIT_REASON = "chain exceeds caveat limit (max \(MAX_CAVEATS_PER_HOP) per hop, \(MAX_CAVEATS_PER_CHAIN) per chain)"
 
     /// True when the chain breaks the caveat caps; reads raw list sizes only, so it runs before any hashing/signature work.
     static func caveatLimitExceeded(_ chain: [JSONValue]) -> Bool {
@@ -49,7 +49,7 @@ enum Capability {
     }
 
     /// F-2 commitment to a holder's PQ key: b64u(sha256("atlas-pca/holder-pq/v1\0" || utf8(pq_pk))).
-    static func holderPqCommitment(_ pqPk: String) -> String {
+    public static func holderPqCommitment(_ pqPk: String) -> String {
         Base64URLStrict.encode(Canonical.sha256(Canonical.utf8("atlas-pca/holder-pq/v1") + [0x00] + Canonical.utf8(pqPk)))
     }
 
@@ -61,7 +61,7 @@ enum Capability {
     }
 
     /// F-2/F-4: a suite carrying a PQ key is accepted only if `pq_pk` hashes to the signer's committed `holder_pq`.
-    static func pqBindingError(_ signed: JObject, committed: String?, label: String) -> String? {
+    public static func pqBindingError(_ signed: JObject, committed: String?, label: String) -> String? {
         guard let suite = PQ.resolve(signed["alg"]?.asString), suite.needsPqPk else { return nil }
         guard let cm = committed else {
             return "\(label): suite '\(suite.alg.rawValue)' needs a PQ key bound to the signer, but the signer's holder carries no holder_pq commitment (unbound PQ keys are rejected; F-2)"
@@ -182,6 +182,23 @@ enum Capability {
                     return "\(label): caveat \(j) altered or reordered"
                 }
             }
+        }
+        return allocationsMonotoneError(chain[chain.count - 1].get("caveats"))
+    }
+
+    /// Carried budget allocations are non-increasing in delegation order (the leaf holds the full append-only list): a child can only allocate <= its parent.
+    static func allocationsMonotoneError(_ caveats: [JSONValue]) -> String? { allocationsMonotoneError(JSONValue.array(caveats)) }
+
+    /// TS `allocationsMonotone`: a `caveats` value that is not an array is `malformed caveats` (it was read as the empty list before).
+    static func allocationsMonotoneError(_ caveatsValue: JSONValue?) -> String? {
+        guard case let .array(caveats)? = caveatsValue else { return "malformed caveats" }
+        var prev = Double.infinity
+        for (i, cv) in caveats.enumerated() where IV.same(cv.get("type")?.asString, "budget_alloc") {
+            guard let lim = IV.num(cv.get("limit")), lim.isFinite, lim >= 0 else { return "budget_alloc caveat \(i): limit must be a finite number >= 0" }
+            if lim > prev {
+                return "budget_alloc caveat \(i): allocation \(Canonical.numberString(lim)) widens the parent's carried allocation \(Canonical.numberString(prev)) (monotone: a child can only allocate <= its parent)"
+            }
+            prev = lim
         }
         return nil
     }

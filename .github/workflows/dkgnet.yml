@@ -1,0 +1,57 @@
+name: DKG TLS
+
+# AtlasPCADkgNet: the reference mutual-TLS 1.3 channel of the FROST DKG (startTlsDkgNode) on swift-nio-ssl (BoringSSL, the same stack on both OSes). Package.swift declares the
+# product only with ATLAS_PCA_DKGNET=1. A three-party ceremony runs over loopback with certificates generated at test time; unpinned, certificate-less, TLS 1.2, plaintext,
+# expired, duplicate and lower-numbered dialers are refused. A matrix of macOS (Xcode 26 CryptoKit) and ubuntu (linux-prep.sh patches the verify target onto swift-crypto).
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ATLAS_PCA_DKGNET: '1'
+
+jobs:
+  dkgnet:
+    name: swift test AtlasPCADkgNet (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the verifier's ML-DSA CryptoKit API)
+        if: runner.os == 'macOS'
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: Linux build tools and libsodium (the ratchet group)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential pkg-config libsodium-dev libsqlite3-dev
+      - name: Flagship tooling + source layout
+        if: runner.os == 'Linux'
+        run: .github/scripts/mutation-layout.sh swift-pca
+      - name: Linux toolchain (Swift, swift-crypto for CryptoKit)
+        if: runner.os == 'Linux'
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+          echo "SWIFT_DIR=$MONO/sdks/swift-pca" >> "$GITHUB_ENV"
+      - name: Build
+        working-directory: ${{ env.SWIFT_DIR || '.' }}
+        run: swift build --product AtlasPCADkgNet
+      - name: Three-party ceremony over mutual TLS and the refusals
+        working-directory: ${{ env.SWIFT_DIR || '.' }}
+        run: swift test --filter AtlasPCADkgNetTests

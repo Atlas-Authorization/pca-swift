@@ -64,13 +64,13 @@ final class IntentTests: XCTestCase {
     }
 
     static func verify(_ p: JSONValue, _ g: JSONValue, _ pol: IntentPolicy? = nil) -> PCA.Verdict {
-        PCA.verify(pcactn: p, grant: g, now: NOW, audience: AUD, intentPolicy: pol)
+        PCA.verify(pcactn: p, grant: g, now: NOW, audience: AUD, intentPolicy: pol, insecureSkipPlanRootCheck: true)
     }
 
     func testAbsentSlotAndInactivePolicyIsThePreM2Verdict() {
         let g = Self.rootGrant([Self.envelope(.string(Self.commit()))])
         let p = Self.pcactn(g, nil)
-        let base = PCA.verify(pcactn: p, grant: g, now: Self.NOW, audience: Self.AUD)
+        let base = PCA.verify(pcactn: p, grant: g, now: Self.NOW, audience: Self.AUD, insecureSkipPlanRootCheck: true)
         XCTAssertTrue(base.allow, base.reason)
         for pol in [nil, IntentPolicy(), IntentPolicy(require: false)] {
             let v = Self.verify(p, g, pol)

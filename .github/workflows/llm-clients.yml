@@ -1,0 +1,36 @@
+name: LLM client integrations
+
+# The typed client adapters are separate packages that depend on the core by path: AtlasPCAOpenAI (MacPaw/OpenAI) and AtlasPCAAnthropic
+# (jamesrochabrun/SwiftAnthropic). They are built against the upstream packages' real types, so this job is what proves the shapes they use.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clients:
+    name: ${{ matrix.package }} (macos)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [AtlasPCAOpenAI, AtlasPCAAnthropic]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26 (the core's MLDSA65 CryptoKit API)
+        run: |
+          x="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$x" ] || { echo "::error::no Xcode 26 on this image"; exit 1; }
+          sudo xcode-select -s "$x"
+      - name: swift test (Integrations/${{ matrix.package }})
+        working-directory: Integrations/${{ matrix.package }}
+        run: swift test
