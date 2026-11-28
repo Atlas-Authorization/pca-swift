@@ -1,0 +1,9 @@
+[
+ {
+  "id": "hook-store",
+  "line": "void cmldsa_randombytes_hook(void (*fn)(uint8_t *, size_t)) { hook_fn = fn; }",
+  "from": "hook_fn = fn;",
+  "to": "hook_fn = NULL;",
+  "what": "the test hook is never installed"
+ }
+]

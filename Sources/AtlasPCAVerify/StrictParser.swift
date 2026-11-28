@@ -6,7 +6,7 @@ import Foundation
 /// single quotes, a BOM, non-JSON whitespace; duplicate object keys (post-unescape); lone surrogates
 /// (raw or escaped); raw control characters (< U+0020) in strings; unknown escapes; nesting deeper than
 /// 32 containers; input longer than 2^20 UTF-8 bytes; and any number not in the canonical wire form.
-enum StrictJSON {
+public enum StrictJSON {
     struct ParseError: Error { let message: String }
 
     static func parse(_ text: String) throws -> JSONValue {
@@ -25,8 +25,18 @@ enum StrictJSON {
     /// string value and would corrupt the raw `pcactn_json` of the BOM vector. Numbers are classified by
     /// lexeme (integer → `.int`, fractional/exponent → `.double`), avoiding `NSNumber` int/double guesswork.
     /// Nesting is bounded by `Canonical.MAX_LENIENT_DEPTH` (a clean error, never a stack overflow).
-    static func parseLenient(_ text: String) throws -> JSONValue {
+    public static func parseLenient(_ text: String) throws -> JSONValue {
         var p = Parser(b: Array(text.utf8), lenient: true)
+        let v = try p.value(1)
+        p.ws()
+        if p.i < p.b.count { throw p.err("trailing characters after the JSON value") }
+        return v
+    }
+
+    /// `JSON.parse` semantics for a repeated member name: the last value wins (the first position is kept), instead of a refusal.
+    public static func parseLenientLastWins(_ text: String) throws -> JSONValue {
+        var p = Parser(b: Array(text.utf8), lenient: true)
+        p.lastWins = true
         let v = try p.value(1)
         p.ws()
         if p.i < p.b.count { throw p.err("trailing characters after the JSON value") }
@@ -37,6 +47,7 @@ enum StrictJSON {
         let b: [UInt8]
         var i = 0
         var lenient = false
+        var lastWins = false
 
         func err(_ m: String) -> ParseError { ParseError(message: "strict JSON: \(m) (at offset \(i))") }
         func peek() -> UInt8? { i < b.count ? b[i] : nil }
@@ -126,16 +137,22 @@ enum StrictJSON {
         mutating func numberLenient() throws -> JSONValue {
             let start = i
             if peek() == 0x2d { i += 1 }
-            while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+            // JSON number grammar: -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?
+            func digits() -> Bool {
+                let s0 = i
+                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                return i > s0
+            }
+            if peek() == 0x30 { i += 1 } else if !digits() { throw err("bad number") }
             var isFloat = false
             if peek() == 0x2e {
                 isFloat = true; i += 1
-                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                if !digits() { throw err("bad number") }
             }
             if let c = peek(), c == 0x65 || c == 0x45 {
                 isFloat = true; i += 1
                 if let s = peek(), s == 0x2b || s == 0x2d { i += 1 }
-                while let c = peek(), (0x30...0x39).contains(c) { i += 1 }
+                if !digits() { throw err("bad number") }
             }
             let lex = String(decoding: b[start..<i], as: UTF8.self)
             // "-0" keeps its sign (JSON.parse("-0") is -0): Int64("-0") would silently drop it
@@ -197,8 +214,8 @@ enum StrictJSON {
                     ws()
                     if peek() != 0x22 { throw err("expected a string key") }
                     let k = try string()
-                    let jk = JKey(k)
-                    if o[jk] != nil { throw err("duplicate key") }
+                    let jk = JKey(k, ord: Int32(truncatingIfNeeded: o.count + 1))
+                    if o[jk] != nil && !lastWins { throw err("duplicate key \(JS.stringify(.string(k)))") } // names the key, as the reference does
                     ws()
                     if peek() != 0x3a { throw err("expected \":\"") }
                     i += 1

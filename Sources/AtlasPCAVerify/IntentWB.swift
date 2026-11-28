@@ -6,29 +6,29 @@ import Foundation
 /// (`intent-classifier.ts`), and their composition (`intent-env.ts` `decideIntentWB`). Every artifact is a closed-member
 /// JSON object signed with strict Ed25519 under a key from the VERIFIER's pins over `utf8(domain) || strictCanonical(artifact
 /// without sig)`; its reference is `base64url(sha256(strictCanonical({d: <ref domain>, <slot>: artifact})))`.
-enum IntentWB {
-    static let FACT_DOMAIN = "atlas-pca/fact/v1\u{0}"
-    static let FACT_REF_DOMAIN = "atlas-pca/fact-ref/v1"
-    static let OFFER_SET_DOMAIN = "atlas-pca/offer-set/v1\u{0}"
-    static let OFFER_SET_REF_DOMAIN = "atlas-pca/offer-set-ref/v1"
-    static let LABELS_DOMAIN = "atlas-pca/labels/v1\u{0}"
-    static let LABELS_REF_DOMAIN = "atlas-pca/labels-ref/v1"
+public enum IntentWB {
+    public static let FACT_DOMAIN = "atlas-pca/fact/v1\u{0}"
+    public static let FACT_REF_DOMAIN = "atlas-pca/fact-ref/v1"
+    public static let OFFER_SET_DOMAIN = "atlas-pca/offer-set/v1\u{0}"
+    public static let OFFER_SET_REF_DOMAIN = "atlas-pca/offer-set-ref/v1"
+    public static let LABELS_DOMAIN = "atlas-pca/labels/v1\u{0}"
+    public static let LABELS_REF_DOMAIN = "atlas-pca/labels-ref/v1"
     static let CLASSIFIER_DOMAIN = "atlas-pca/intent-classifier/v1\u{0}"
     static let CLASSIFIER_REF_DOMAIN = "atlas-pca/intent-classifier-ref/v1"
-    static let MAX_COMMITTED_FACTS = 16
-    static let MAX_WORLDS = 16
-    static let MAX_RELATIONAL = 16
+    public static let MAX_COMMITTED_FACTS = 16
+    public static let MAX_WORLDS = 16
+    public static let MAX_RELATIONAL = 16
     static let DEFAULT_SKEW_MS: Int64 = 60_000
-    static let MAX_OFFERS = 256
-    static let MAX_OFFER_ATTRS = 32
-    static let MAX_QUERY_KEYS = 32
-    static let MAX_LABEL_FIELDS = 64
-    static let MAX_PROV_PATHS = 32
-    static let MAX_PROV_REFS = 8
-    static let MAX_COMMITTED_LABELS = 16
+    public static let MAX_OFFERS = 256
+    public static let MAX_OFFER_ATTRS = 32
+    public static let MAX_QUERY_KEYS = 32
+    public static let MAX_LABEL_FIELDS = 64
+    public static let MAX_PROV_PATHS = 32
+    public static let MAX_PROV_REFS = 8
+    public static let MAX_COMMITTED_LABELS = 16
     static let MAX_COMMITTED_CLASSES = 8
     static let MAX_CLASSIFIER_LABELS = 32
-    static let LABEL_REF_PREFIX = "pca-labels:"
+    public static let LABEL_REF_PREFIX = "pca-labels:"
     static let TAINT_LEVELS = ["trusted", "first_party", "tool", "web", "agent"]
     static let TAINTED_RANK = 2
 
@@ -84,7 +84,9 @@ enum IntentWB {
     }
 
     static func artifactRef(_ domain: String, _ slot: String, _ a: JSONValue) -> String? {
-        IV.strictHash(.object(["d": .string(domain), JKey(slot): a]))
+        var body: JObject = ["d": .string(domain)]
+        body[JKey(slot)] = a // a slot named `d` replaces the domain member, as in the reference's object literal
+        return IV.strictHash(.object(body))
     }
 
     /// `resolveParamPath(params, path)`: `action.params.<a>.<b>…`, own members of plain objects, usable segments only.
@@ -102,7 +104,7 @@ enum IntentWB {
     static func isParamPath(_ v: JSONValue?) -> Bool {
         guard let p = v?.asString, IV.startsWith(p, "action.params.") else { return false }
         let segs = IV.split(IV.dropPrefix(p, 14), ".")
-        return segs.count >= 1 && segs.count <= 8 && segs.allSatisfy(IV.isPathSegment)
+        return segs.count <= 8 && segs.allSatisfy(IV.isPathSegment) // split keeps empties: never an empty list
     }
 
     /// An optional list member: ABSENT = []; an array; anything else (JSON null included) is malformed (nil: fail closed).
@@ -122,7 +124,7 @@ enum IntentWB {
 
     // ---- rule 16: facts, relational dimensions, offer sets ----
 
-    static func validateFactWire(_ fv: JSONValue) -> Bool {
+    public static func validateFactWire(_ fv: JSONValue) -> Bool {
         guard case let .object(f) = fv, closedMembers(f, ["v", "kind", "name", "subject", "value", "t_obs", "oracle", "sig"], SUITE_MEMBERS) else { return false }
         guard IV.num(f["v"]) == 1, IV.same(f["kind"]?.asString, "pca-fact") else { return false }
         guard let n = f["name"]?.asString, IV.isName(n), IV.bounded(f["subject"], 256) != nil else { return false }
@@ -132,7 +134,7 @@ enum IntentWB {
     }
 
     /// floor(a * 10^6 / b) exactly (128-bit), nil when b <= 0, a < 0 or the result is not a safe integer.
-    static func ratioPpm(_ a: Int64, _ b: Int64) -> Int64? {
+    public static func ratioPpm(_ a: Int64, _ b: Int64) -> Int64? {
         if !(b > 0) || a < 0 { return nil }
         let (hi, lo) = UInt64(a).multipliedFullWidth(by: 1_000_000)
         if hi >= UInt64(b) { return nil }
@@ -140,7 +142,7 @@ enum IntentWB {
         return q <= UInt64(Canonical.MAX_SAFE) ? Int64(q) : nil
     }
 
-    static func validateOfferPolicy(_ pv: JSONValue) -> String? {
+    public static func validateOfferPolicy(_ pv: JSONValue) -> String? {
         guard case let .object(p) = pv else { return "offers policy must be an object" }
         if let e = closedMembersError(p, ["name", "site_keys", "max_age_ms", "offer_param", "filter"], [], "offers") { return e }
         if p["name"]?.asString == nil { return "offers policy needs a name" }
@@ -161,7 +163,7 @@ enum IntentWB {
         return nil
     }
 
-    static func validateWorldPolicy(_ pv: JSONValue) -> String? {
+    public static func validateWorldPolicy(_ pv: JSONValue) -> String? {
         guard case let .object(p) = pv else { return "world policy must be an object" }
         if let e = closedMembersError(p, [], ["skew_ms", "worlds", "relational", "offers"], "policy") { return e }
         if let s = p["skew_ms"], IV.nonNeg(s) == nil { return "skew_ms must be a non-negative safe integer" }
@@ -226,7 +228,7 @@ enum IntentWB {
         prov != nil || nonEmptyArray(labels) || (policy?.isObject ?? false)
     }
 
-    static func validateOfferSetWire(_ ov: JSONValue) -> Bool { offerSetWireError(ov) == nil }
+    public static func validateOfferSetWire(_ ov: JSONValue) -> Bool { offerSetWireError(ov) == nil }
 
     /// `validateOfferSetWire`: nil = well-formed, else the reference's reason.
     static func offerSetWireError(_ ov: JSONValue) -> String? {
@@ -256,12 +258,12 @@ enum IntentWB {
         return nil
     }
 
-    static func offerMatches(_ offer: JObject, _ f: JObject) -> Bool {
+    public static func offerMatches(_ offer: JObject, _ f: JObject) -> Bool {
         f.allSatisfy { k, v in offer[k].map { IV.scalarEq($0, v) } ?? false }
     }
 
     /// `decideOfferSet`: the excess of the chosen offer over the cheapest offer satisfying the filter, or the refusal reason.
-    static func decideOfferSet(policy: JObject, committed: JSONValue?, offerSet: JSONValue?, params: JSONValue, aud: String, session: String,
+    public static func decideOfferSet(policy: JObject, committed: JSONValue?, offerSet: JSONValue?, params: JSONValue, aud: String, session: String,
                                now nowClock: Int64?, skewMs: Double) -> (excess: Int64?, reason: String) {
         func no(_ r: String) -> (Int64?, String) { (nil, "offers: \(r)") }
         guard let c = committed?.asString else { return no("the PCActn commits no offer set but the policy requires one") }
@@ -278,7 +280,7 @@ enum IntentWB {
         guard IV.same(os["session"]?.asString, session), let issued = IV.num(os["issued_at"]) else { return no("the offer set is bound to another session") }
         guard let nowI = nowClock else { return no("no usable clock (now must be a safe integer): the offer set counts as stale") }
         let now = Double(nowI)
-        if issued > now + skewMs { return no("the offer set is issued in the future") }
+        if !(issued <= now + skewMs) { return no("the offer set is issued in the future") }
         if now - issued > (IV.num(policy["max_age_ms"]) ?? 0) { return no("the offer set is stale") }
         guard case .bool(true)? = os["complete"] else { return no("the offer set is not declared complete") }
         guard case let .object(query)? = os["query"], case let .object(filter)? = policy["filter"], case let .object(fq)? = filter["query"],
@@ -409,7 +411,7 @@ enum IntentWB {
     static func rank(_ level: String) -> Int { TAINT_LEVELS.firstIndex(of: level) ?? 4 }
     static func isTaintLevel(_ v: JSONValue?) -> Bool { v?.asString.map { s in TAINT_LEVELS.contains { IV.same($0, s) } } ?? false }
 
-    static func validateLabelsWire(_ lv: JSONValue) -> Bool {
+    public static func validateLabelsWire(_ lv: JSONValue) -> Bool {
         guard case let .object(l) = lv, closedMembers(l, ["v", "kind", "site", "session", "response_digest", "fields", "issued_at", "kid", "sig"], SUITE_MEMBERS),
               IV.num(l["v"]) == 1, IV.same(l["kind"]?.asString, "pca-labels"), IV.bounded(l["site"], 256) != nil, IV.digest(l["session"]) != nil,
               IV.digest(l["response_digest"]) != nil, case let .object(fields)? = l["fields"], !fields.isEmpty, fields.count <= MAX_LABEL_FIELDS else { return false }
@@ -420,7 +422,7 @@ enum IntentWB {
         return IV.nonNeg(l["issued_at"]) != nil && IV.bounded(l["kid"], 64) != nil && l["sig"]?.asString != nil
     }
 
-    static func validateFlowRules(_ rv: JSONValue) -> Bool { flowRulesError(rv) == nil }
+    public static func validateFlowRules(_ rv: JSONValue) -> Bool { flowRulesError(rv) == nil }
 
     /// `validateFlowRules`: nil = well-formed, else the reference's reason.
     static func flowRulesError(_ rv: JSONValue) -> String? {
@@ -434,7 +436,7 @@ enum IntentWB {
     }
 
     /// `flowAllowed(rules, cls, origin, aud)`: same origin or `public`; else the most specific matching pattern lists `aud`.
-    static func flowAllowed(_ rules: JObject, _ cls: String, _ origin: String, _ aud: String) -> Bool {
+    public static func flowAllowed(_ rules: JObject, _ cls: String, _ origin: String, _ aud: String) -> Bool {
         if IV.same(aud, origin) || IV.same(cls, "public") { return true }
         var pattern: String?
         if rules[JKey(cls)] != nil {
@@ -453,7 +455,7 @@ enum IntentWB {
 
     static let MODES = ["allow", "question", "question_typed", "deny"]
 
-    static func validateProvenancePolicy(_ pv: JSONValue) -> Bool { provenancePolicyError(pv) == nil }
+    public static func validateProvenancePolicy(_ pv: JSONValue) -> Bool { provenancePolicyError(pv) == nil }
 
     /// `validateProvenancePolicy`: nil = well-formed, else the reference's reason.
     static func provenancePolicyError(_ pv: JSONValue) -> String? {
@@ -545,7 +547,6 @@ enum IntentWB {
         guard let suppliedLabels = list(labelsIn) else { return deny("labels must be an array") }
         let paths = prov.keys.map { $0.s }.sorted(by: IV.utf8Less)
         for p in paths where resolveParamPath(params, p) == nil { return deny("prov names '\(p)', a parameter the action does not carry") }
-        for a in paths { for b in paths where !IV.same(a, b) && IV.startsWith(b, a + ".") { return deny("prov paths '\(a)' and '\(b)' overlap") } }
         var receipts: [JKey: JObject] = [:]
         for r in suppliedLabels where validateLabelsWire(r) {
             if let ref = artifactRef(LABELS_REF_DOMAIN, "l", r) { receipts[JKey(ref)] = r.asObject! }
@@ -555,7 +556,7 @@ enum IntentWB {
         var origins: [String: [(cls: String, origin: String)]] = [:]
         for p in paths {
             let value = resolveParamPath(params, p)!
-            var maxRank = -1
+            var maxRank = 0 // provWireError: at least one ref, so the join below always runs
             for refV in prov[JKey(p)]!.asArray! {
                 let ref = refV.asString!
                 if !IV.startsWith(ref, LABEL_REF_PREFIX) {
@@ -581,7 +582,7 @@ enum IntentWB {
                 maxRank = max(maxRank, rank(match ? (IV.same(site, aud) ? "first_party" : "tool") : "agent"))
                 origins[p, default: []].append((f.get("class")!.asString!, site))
             }
-            d.labels[p] = TAINT_LEVELS[maxRank < 0 ? 4 : maxRank]
+            d.labels[p] = TAINT_LEVELS[maxRank]
         }
         for p in pparams.keys.map({ $0.s }).sorted(by: IV.utf8Less) where d.labels[p] == nil {
             if resolveParamPath(params, p) != nil { d.labels[p] = "agent" }
@@ -730,6 +731,7 @@ enum IntentWB {
         var world: JObject?
         var prov: JObject?
         var cls: JObject?
+        var singleSource: [String] = [] // worlds decided by ONE oracle (rule 21: env.world.<name> is then model-derived)
         var reason: String?
     }
 
@@ -755,6 +757,7 @@ enum IntentWB {
             if !w.ok { out.outcome = "deny"; out.checks = [("facts", "fail")]; out.reason = w.reason; return out }
             out.checks.append(("facts", "pass"))
             out.world = w.world
+            out.singleSource = w.singleSource
         }
         let provPolicy = policy?.get("provenance")
         if provenanceActive(prov: s.get("prov"), labels: s.get("labels"), policy: provPolicy) {

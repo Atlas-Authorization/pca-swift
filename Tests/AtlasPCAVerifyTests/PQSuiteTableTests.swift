@@ -21,6 +21,14 @@ final class PQSuiteTableTests: XCTestCase {
             "hybrid-nested-ed25519-ml-dsa-65": (true, true, true, true),
             "ml-dsa-87": (true, false, false, true),
             "hybrid-ed25519-ml-dsa-87": (true, true, false, true),
+            "fn-dsa-512": (true, false, false, false),
+            "fn-dsa-1024": (true, false, false, false),
+            "less-cat1": (true, false, false, false),
+            "hybrid-ed25519-less-cat1": (true, true, false, false),
+            "slh-dsa-sha2-128f": (true, false, false, false),
+            "hybrid-ed25519-slh-dsa-sha2-128f": (true, true, false, false),
+            "slh-dsa-sha2-256s": (true, false, false, false),
+            "hybrid-ed25519-slh-dsa-sha2-256s": (true, true, false, false),
         ]
         XCTAssertEqual(Set(PQ.suites.keys), Set(want.keys))
         for (name, w) in want {

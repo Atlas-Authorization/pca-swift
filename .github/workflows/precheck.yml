@@ -1,0 +1,63 @@
+name: Precheck
+
+# Compile-only gate, swift build --build-tests on Linux (package, opt-in products, integrations).
+# Runs only on pre/** pushes (and by hand): it builds and typechecks everything, tests included, and runs no test.
+# Push pre/<version> first and the full ci/** run only when this is green.
+on:
+  push:
+    branches: ['pre/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  precheck:
+    name: swift build --build-tests (Linux)
+    runs-on: ubuntu-24.04
+    container: swift:6.2
+    timeout-minutes: 50 # the core, DKG net and every integration package build from scratch
+    steps:
+      - uses: actions/checkout@v4
+      - name: Container tools for the Linux prep
+        run: apt-get update -qq && apt-get install -y -qq cmake python3 sudo git curl ca-certificates libsqlite3-dev binutils >/dev/null
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh swift-pca
+      # the prep installs the Swift toolchain and swift-crypto for CryptoKit, then builds the package with its tests
+      - name: Linux toolchain + swift build --build-tests (default package)
+        id: c0
+        continue-on-error: true
+        working-directory: ${{ env.MONO }}
+        run: |
+          bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      # the WebAssembly host product needs a Swift 6.3 toolchain; the toolchain the main workflows use is 6.2, so it is not built here
+      - name: Opt-in network ceremony product
+        id: c1
+        continue-on-error: true
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        env:
+          ATLAS_PCA_DKGNET: '1'
+        run: swift build --build-tests
+      - name: Integration packages
+        id: c2
+        continue-on-error: true
+        shell: bash
+        working-directory: ${{ env.MONO }}/sdks/swift-pca
+        run: |
+          rc=0
+          for d in Integrations/*/; do
+            [ -f "$d/Package.swift" ] || continue
+            echo "::group::$d"; (cd "$d" && swift build --build-tests) || { echo "::error::$d failed"; rc=1; }; echo "::endgroup::"
+          done
+          exit $rc
+      # every check above runs even when an earlier one failed; this step makes the job red when any did
+      - name: Summary
+        if: ${{ always() && (steps.c0.outcome == 'failure' || steps.c1.outcome == 'failure' || steps.c2.outcome == 'failure') }}
+        run: |
+          echo "::error::one or more compile checks failed; each failing step above has the details"
+          exit 1

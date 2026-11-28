@@ -14,16 +14,16 @@ final class LimitsTests: XCTestCase {
         let grant = JSONValue.object([:])
         let pad = { (n: Int) in "{}" + String(repeating: " ", count: n - 2) }
         for n in [PCA.MAX_ARTIFACT_BYTES - 1, PCA.MAX_ARTIFACT_BYTES] {
-            XCTAssertFalse(PCA.verify(json: pad(n), grant: grant, now: 0, audience: "a").reason.contains(PCA.ARTIFACT_SIZE_REASON), "\(n) bytes must reach the parser")
+            XCTAssertFalse(PCA.verify(json: pad(n), grant: grant, now: 0, audience: "a", insecureSkipPlanRootCheck: true).reason.contains(PCA.ARTIFACT_SIZE_REASON), "\(n) bytes must reach the parser")
         }
         let t0 = Date()
-        let v = PCA.verify(json: "x" + pad(PCA.MAX_ARTIFACT_BYTES), grant: grant, now: 0, audience: "a") // garbage: the SIZE reason proves it precedes parsing
+        let v = PCA.verify(json: "x" + pad(PCA.MAX_ARTIFACT_BYTES), grant: grant, now: 0, audience: "a", insecureSkipPlanRootCheck: true) // garbage: the SIZE reason proves it precedes parsing
         XCTAssertFalse(v.allow)
         XCTAssertEqual(v.checks, ["wire": false])
         XCTAssertTrue(v.reason.contains(PCA.ARTIFACT_SIZE_REASON))
         XCTAssertLessThan(Date().timeIntervalSince(t0), 0.1)
         // UTF-8 bytes, not characters: 174763 euro signs are 524289 bytes
-        XCTAssertTrue(PCA.verify(json: String(repeating: "\u{20AC}", count: 174763), grant: grant, now: 0, audience: "a").reason.contains(PCA.ARTIFACT_SIZE_REASON))
+        XCTAssertTrue(PCA.verify(json: String(repeating: "\u{20AC}", count: 174763), grant: grant, now: 0, audience: "a", insecureSkipPlanRootCheck: true).reason.contains(PCA.ARTIFACT_SIZE_REASON))
     }
 
     func testInt64MinIsNotSafeAndDoesNotTrap() {

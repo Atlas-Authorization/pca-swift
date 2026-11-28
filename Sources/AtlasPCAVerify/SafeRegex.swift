@@ -7,10 +7,10 @@ import Foundation
 /// UTF-16 code units (`.` excludes `\n \r U+2028 U+2029`; `\d \w \s` are the JavaScript sets; no `\b`, no backreferences,
 /// no lookaround), at most 4096 NFA instructions, `{n,m}` bounds <= 64, and a refusal when
 /// `instructions x (subject length + 1)` exceeds 2,000,000. Groups nest at most 256 deep (fail closed beyond).
-enum SafeRegex {
-    static let MAX_NFA_INSTRUCTIONS = 4096
-    static let MAX_REPEAT: UInt64 = 64
-    static let MAX_MATCH_STEPS = 2_000_000
+public enum SafeRegex {
+    public static let MAX_NFA_INSTRUCTIONS = 4096
+    public static let MAX_REPEAT: UInt64 = 64
+    public static let MAX_MATCH_STEPS = 2_000_000
     static let MAX_PARSE_DEPTH = 256
     static let MAX_BOUNDED_REPEAT: UInt64 = 64
     static let MAX_REGEX_COST_BITS = 22
@@ -508,26 +508,7 @@ enum SafeRegex {
     static let MAX_REGEX_SOURCE_CHARS_PER_DOCUMENT = 8192
     static let MAX_REGEX_STEPS_PER_DOCUMENT = 5_000_000
 
-    /// One document scope (`withRegexBudget`): every regex evaluation in it is charged; once a cap would be exceeded the
-    /// scope is poisoned and every later evaluation is refused (no match).
-    final class Budget {
-        var evaluations = 0
-        var chars = 0
-        var steps = 0
-        func charge(srcUnits: Int, progLen: Int, subjectUnits: Int) -> Bool {
-            let ev = evaluations + 1
-            let ch = chars + srcUnits
-            let st = steps + progLen * (subjectUnits + 1)
-            if ev > MAX_REGEX_EVALUATIONS_PER_DOCUMENT || ch > MAX_REGEX_SOURCE_CHARS_PER_DOCUMENT || st > MAX_REGEX_STEPS_PER_DOCUMENT {
-                evaluations = MAX_REGEX_EVALUATIONS_PER_DOCUMENT + 1
-                return false
-            }
-            evaluations = ev
-            chars = ch
-            steps = st
-            return true
-        }
-    }
+    typealias Budget = PCARegexBudget
 
     /// `isSafeRegexSource(src)`, then `chargeRegex(src, subject.length)`, then `safeRegexFullMatch(src, subject)`:
     /// nil = unknown (outside the subset, over the document budget, or the engine gave up).

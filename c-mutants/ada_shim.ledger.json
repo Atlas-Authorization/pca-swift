@@ -1,0 +1,10 @@
+[
+ {
+  "id": "empty-host",
+  "reason": "Equivalent: the host is set on a special-scheme (ws) URL, where the URL standard makes the hostname setter fail on an empty host, and input that the parser strips to nothing (tab, newline) is empty too; an empty input is already refused above. So set_hostname never succeeds with an empty result and the extra check is never decided."
+ },
+ {
+  "id": "drop-empty",
+  "reason": "Equivalent for every input: the mutant differs only for a non-NULL input with input_len == 0, which then reaches set_hostname with an empty string on the special-scheme URL ws://x; the URL standard's hostname setter fails on an empty host for a special scheme (the reason the empty-host entry above holds), so the function returns 0 at the set_hostname check, the same 0 as the original's early return."
+ }
+]

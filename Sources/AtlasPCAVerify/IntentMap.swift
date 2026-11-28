@@ -4,7 +4,7 @@ import Foundation
 /// `packages/pca/src/intent-map-commit.ts`: salted kind-tagged leaves, the RFC 6962 / 9162 tree with a tagged node hash,
 /// `map_commit = base64url(SHA-256(TAG_COMMIT || u64be(n) || root))`, closed and typed leaves, RFC 9162 audit-path
 /// openings, and the exact cell of the action.
-enum IntentMap {
+public enum IntentMap {
     static let TAG_HEADER = "atlas-pca/intent-map/header/v1\u{0}"
     static let TAG_CELL = "atlas-pca/intent-map/cell/v1\u{0}"
     static let TAG_METRICS = "atlas-pca/intent-map/metrics/v1\u{0}"
@@ -14,7 +14,7 @@ enum IntentMap {
     static let FORM_COMMIT = "commit"
     static let OTHER = "\u{22A5}"
     static let MAX_LEAVES: Int64 = 1 << 24
-    static let MAX_VERB_CELLS: Int64 = 1 << 20
+    public static let MAX_VERB_CELLS: Int64 = 1 << 20
     static let MAX_DIMS = 16
     static let MAX_CUTS = 256
     static let MAX_VALUES = 256

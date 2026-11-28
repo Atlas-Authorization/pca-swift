@@ -1,0 +1,510 @@
+[
+ {
+  "id": "gt-bytes",
+  "line": "#define GT_BYTES 576",
+  "from": "576",
+  "to": "575",
+  "what": "GT_BYTES one short"
+ },
+ {
+  "id": "r-first",
+  "line": "    0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1, 0xd8, 0x05,",
+  "from": "0x73",
+  "to": "0x72",
+  "what": "subgroup order high byte changed"
+ },
+ {
+  "id": "r-last",
+  "line": "    0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01};",
+  "from": "0x00, 0x01};",
+  "to": "0x00, 0x00};",
+  "what": "subgroup order low byte changed"
+ },
+ {
+  "id": "coord-fp6",
+  "line": "static blst_fp *coord(blst_fp12 *x, int i) { return &x->fp6[i / 6].fp2[(i % 6) / 2].fp[i % 2]; }",
+  "from": "i / 6",
+  "to": "i / 12",
+  "what": "every coordinate in the first Fp6 (i / 12; i / 3 would index past the two Fp6 and corrupt the stack, a crash rather than a verdict)"
+ },
+ {
+  "id": "coord-fp2",
+  "line": "static blst_fp *coord(blst_fp12 *x, int i) { return &x->fp6[i / 6].fp2[(i % 6) / 2].fp[i % 2]; }",
+  "from": "(i % 6) / 2",
+  "to": "(i % 6) / 3",
+  "what": "Fp2 index from (i % 6) / 3"
+ },
+ {
+  "id": "coord-fp",
+  "line": "static blst_fp *coord(blst_fp12 *x, int i) { return &x->fp6[i / 6].fp2[(i % 6) / 2].fp[i % 2]; }",
+  "from": "fp[i % 2]",
+  "to": "fp[(i + 1) % 2]",
+  "what": "Fp coordinate order swapped"
+ },
+ {
+  "id": "tobytes-count",
+  "line": "    for (int i = 0; i < 12; i++) blst_bendian_from_fp(out + 48 * i, coord((blst_fp12 *)x, i));",
+  "from": "i < 12",
+  "to": "i < 11",
+  "what": "last coordinate not written"
+ },
+ {
+  "id": "tobytes-stride",
+  "line": "    for (int i = 0; i < 12; i++) blst_bendian_from_fp(out + 48 * i, coord((blst_fp12 *)x, i));",
+  "from": "48 * i",
+  "to": "47 * i",
+  "what": "coordinate stride 47"
+ },
+ {
+  "id": "frombytes-ok-init",
+  "line": "    int ok = 1;",
+  "from": "= 1",
+  "to": "= 0",
+  "what": "decoding never succeeds"
+ },
+ {
+  "id": "frombytes-loop",
+  "line": "    for (int i = 0; i < 12; i++) {",
+  "from": "i < 12",
+  "to": "i < 11",
+  "what": "last coordinate not checked or decoded"
+ },
+ {
+  "id": "frombytes-and",
+  "line": "        ok &= memcmp(back, in + 48 * i, 48) == 0;",
+  "from": "&=",
+  "to": "|=",
+  "what": "one canonical coordinate is enough"
+ },
+ {
+  "id": "frombytes-neq",
+  "line": "        ok &= memcmp(back, in + 48 * i, 48) == 0;",
+  "from": "== 0",
+  "to": "!= 0",
+  "what": "canonical coordinates refused"
+ },
+ {
+  "id": "frombytes-len",
+  "line": "        ok &= memcmp(back, in + 48 * i, 48) == 0;",
+  "from": "in + 48 * i, 48)",
+  "to": "in + 48 * i, 47)",
+  "what": "last byte of a coordinate not compared"
+ },
+ {
+  "id": "frombytes-stride",
+  "line": "        blst_fp_from_bendian(coord(x, i), in + 48 * i);",
+  "from": "48 * i",
+  "to": "47 * i",
+  "what": "coordinate stride 47 when decoding"
+ },
+ {
+  "id": "cswap-mask",
+  "line": "    volatile byte mask = (byte)(0 - bit);",
+  "from": "0 - bit",
+  "to": "0 + bit",
+  "what": "mask is the bit, not all-ones"
+ },
+ {
+  "id": "cswap-len",
+  "line": "    for (size_t i = 0; i < sizeof(blst_fp12); i++) {",
+  "from": "i < sizeof(blst_fp12)",
+  "to": "i < sizeof(blst_fp12) - 1",
+  "what": "last byte never swapped"
+ },
+ {
+  "id": "cswap-diff",
+  "line": "        byte t = (byte)((pa[i] ^ pb[i]) & mask);",
+  "from": "pa[i] ^ pb[i]",
+  "to": "pa[i] & pb[i]",
+  "what": "difference by AND"
+ },
+ {
+  "id": "cswap-and",
+  "line": "        byte t = (byte)((pa[i] ^ pb[i]) & mask);",
+  "from": "& mask",
+  "to": "| mask",
+  "what": "mask applied by OR"
+ },
+ {
+  "id": "cswap-a",
+  "line": "        pa[i] ^= t;",
+  "from": "^= t",
+  "to": "= t",
+  "what": "a overwritten by the difference"
+ },
+ {
+  "id": "cswap-b",
+  "line": "        pb[i] ^= t;",
+  "from": "^= t",
+  "to": "= t",
+  "what": "b overwritten by the difference"
+ },
+ {
+  "id": "pow-init",
+  "line": "    blst_fp12 r0 = *blst_fp12_one(), r1 = *x, t;",
+  "from": "r1 = *x",
+  "to": "r1 = *blst_fp12_one()",
+  "what": "ladder starts from one twice"
+ },
+ {
+  "id": "pow-rounds",
+  "line": "    for (int i = 0; i < 256; i++) {",
+  "from": "i < 256",
+  "to": "i < 255",
+  "what": "last exponent bit ignored"
+ },
+ {
+  "id": "pow-byte",
+  "line": "        byte bit = (byte)((k[i / 8] >> (7 - i % 8)) & 1);",
+  "from": "i / 8",
+  "to": "i / 9",
+  "what": "wrong exponent byte"
+ },
+ {
+  "id": "pow-shift",
+  "line": "        byte bit = (byte)((k[i / 8] >> (7 - i % 8)) & 1);",
+  "from": "(7 - i % 8)",
+  "to": "(i % 8)",
+  "what": "bit order reversed"
+ },
+ {
+  "id": "pow-mask",
+  "line": "        byte bit = (byte)((k[i / 8] >> (7 - i % 8)) & 1);",
+  "from": "& 1);",
+  "to": "& 0);",
+  "what": "every exponent bit zero"
+ },
+ {
+  "id": "pow-swap-first",
+  "line": "        cswap(&r0, &r1, bit);",
+  "from": "cswap(&r0, &r1, bit);",
+  "to": "(void)bit;",
+  "what": "first conditional swap removed",
+  "nth": 1
+ },
+ {
+  "id": "pow-swap-last",
+  "line": "        cswap(&r0, &r1, bit);",
+  "from": "cswap(&r0, &r1, bit);",
+  "to": "(void)bit;",
+  "what": "second conditional swap removed",
+  "nth": 2
+ },
+ {
+  "id": "pow-mul",
+  "line": "        blst_fp12_mul(&t, &r0, &r1);",
+  "from": "&r0, &r1",
+  "to": "&r0, &r0",
+  "what": "product of r0 with itself"
+ },
+ {
+  "id": "pow-r1",
+  "line": "        r1 = t;",
+  "from": "r1 = t;",
+  "to": "r1 = r0;",
+  "what": "r1 not updated with the product"
+ },
+ {
+  "id": "pow-sqr",
+  "line": "        blst_fp12_sqr(&t, &r0);",
+  "from": "&r0",
+  "to": "&r1",
+  "what": "square of r1"
+ },
+ {
+  "id": "pow-r0",
+  "line": "        r0 = t;",
+  "from": "r0 = t;",
+  "to": "r0 = r1;",
+  "what": "r0 not updated with the square"
+ },
+ {
+  "id": "pow-out",
+  "line": "    *out = r0;",
+  "from": "r0",
+  "to": "r1",
+  "what": "result is r1"
+ },
+ {
+  "id": "mul-or",
+  "line": "    if (!gt_from_bytes(&x, a) || !gt_from_bytes(&y, b)) return 0;",
+  "from": "||",
+  "to": "&&",
+  "what": "one valid operand is enough"
+ },
+ {
+  "id": "mul-ret",
+  "line": "    if (!gt_from_bytes(&x, a) || !gt_from_bytes(&y, b)) return 0;",
+  "from": "return 0",
+  "to": "return 1",
+  "what": "invalid operand reported as success"
+ },
+ {
+  "id": "mul-first",
+  "line": "    if (!gt_from_bytes(&x, a) || !gt_from_bytes(&y, b)) return 0;",
+  "from": "!gt_from_bytes(&x, a) || ",
+  "to": "",
+  "what": "first operand not decoded or checked"
+ },
+ {
+  "id": "mul-second",
+  "line": "    if (!gt_from_bytes(&x, a) || !gt_from_bytes(&y, b)) return 0;",
+  "from": " || !gt_from_bytes(&y, b)",
+  "to": "",
+  "what": "second operand not checked"
+ },
+ {
+  "id": "mul-op",
+  "line": "    blst_fp12_mul(&z, &x, &y);",
+  "from": "&x, &y",
+  "to": "&x, &x",
+  "what": "square instead of product"
+ },
+ {
+  "id": "mul-out",
+  "line": "    gt_to_bytes(out, &z);",
+  "from": "&z",
+  "to": "&x",
+  "what": "first operand written back",
+  "nth": 1
+ },
+ {
+  "id": "pow-in",
+  "line": "    if (!gt_from_bytes(&x, a)) return 0;",
+  "from": "return 0",
+  "to": "return 1",
+  "what": "invalid base reported as success"
+ },
+ {
+  "id": "pow-exp",
+  "line": "    gt_pow(&z, &x, k);",
+  "from": "&x, k",
+  "to": "&x, R_BE",
+  "what": "fixed exponent"
+ },
+ {
+  "id": "pow-out-bytes",
+  "line": "    gt_to_bytes(out, &z);",
+  "from": "&z",
+  "to": "&x",
+  "what": "base written back",
+  "nth": 2
+ },
+ {
+  "id": "elem-or",
+  "line": "    if (!gt_from_bytes(&x, a) || blst_fp12_is_one(&x)) return 0;",
+  "from": "||",
+  "to": "&&",
+  "what": "identity or malformed accepted"
+ },
+ {
+  "id": "elem-one",
+  "line": "    if (!gt_from_bytes(&x, a) || blst_fp12_is_one(&x)) return 0;",
+  "from": "blst_fp12_is_one(&x)",
+  "to": "!blst_fp12_is_one(&x)",
+  "what": "identity accepted, others refused"
+ },
+ {
+  "id": "elem-malformed",
+  "line": "    if (!gt_from_bytes(&x, a) || blst_fp12_is_one(&x)) return 0;",
+  "from": "!gt_from_bytes(&x, a) || ",
+  "to": "",
+  "what": "malformed bytes not refused"
+ },
+ {
+  "id": "elem-ret",
+  "line": "    if (!gt_from_bytes(&x, a) || blst_fp12_is_one(&x)) return 0;",
+  "from": "return 0",
+  "to": "return 1",
+  "what": "identity or malformed reported as element"
+ },
+ {
+  "id": "elem-exp",
+  "line": "    gt_pow(&z, &x, R_BE);",
+  "from": "R_BE",
+  "to": "R_BE + 1",
+  "what": "wrong subgroup exponent"
+ },
+ {
+  "id": "elem-final",
+  "line": "    return blst_fp12_is_one(&z) ? 1 : 0;",
+  "from": "? 1 : 0",
+  "to": "? 0 : 1",
+  "what": "verdict inverted"
+ },
+ {
+  "id": "pair-n0",
+  "line": "    if (n == 0) return 0;",
+  "from": "n == 0",
+  "to": "n == 1",
+  "what": "one pair refused"
+ },
+ {
+  "id": "pair-n0-ret",
+  "line": "    if (n == 0) return 0;",
+  "from": "return 0",
+  "to": "return 1",
+  "what": "empty product reported as success"
+ },
+ {
+  "id": "pair-loop",
+  "line": "    for (size_t i = 0; i < n; i++) {",
+  "from": "i < n",
+  "to": "i < n - 1",
+  "what": "last pair skipped"
+ },
+ {
+  "id": "pair-flag1",
+  "line": "        if (!(g1s[48 * i] & 0x80) || !(g2s[96 * i] & 0x80)) return 0;",
+  "from": "!(g1s[48 * i] & 0x80)",
+  "to": "(g1s[48 * i] & 0x80)",
+  "what": "compressed G1 refused, uncompressed accepted"
+ },
+ {
+  "id": "pair-flag2",
+  "line": "        if (!(g1s[48 * i] & 0x80) || !(g2s[96 * i] & 0x80)) return 0;",
+  "from": "!(g2s[96 * i] & 0x80)",
+  "to": "(g2s[96 * i] & 0x80)",
+  "what": "compressed G2 refused, uncompressed accepted"
+ },
+ {
+  "id": "pair-flag-or",
+  "line": "        if (!(g1s[48 * i] & 0x80) || !(g2s[96 * i] & 0x80)) return 0;",
+  "from": "||",
+  "to": "&&",
+  "what": "one compression flag is enough"
+ },
+ {
+  "id": "pair-flag1-drop",
+  "line": "        if (!(g1s[48 * i] & 0x80) || !(g2s[96 * i] & 0x80)) return 0;",
+  "from": "!(g1s[48 * i] & 0x80) || ",
+  "to": "",
+  "what": "G1 compression flag not required"
+ },
+ {
+  "id": "pair-flag2-drop",
+  "line": "        if (!(g1s[48 * i] & 0x80) || !(g2s[96 * i] & 0x80)) return 0;",
+  "from": " || !(g2s[96 * i] & 0x80)",
+  "to": "",
+  "what": "G2 compression flag not required"
+ },
+ {
+  "id": "pair-p1",
+  "line": "        if (blst_p1_uncompress(&p, g1s + 48 * i) != BLST_SUCCESS) return 0;",
+  "from": "!= BLST_SUCCESS",
+  "to": "== BLST_SUCCESS",
+  "what": "valid G1 refused"
+ },
+ {
+  "id": "pair-p1-stride",
+  "line": "        if (blst_p1_uncompress(&p, g1s + 48 * i) != BLST_SUCCESS) return 0;",
+  "from": "48 * i",
+  "to": "47 * i",
+  "what": "G1 stride 47"
+ },
+ {
+  "id": "pair-p2",
+  "line": "        if (blst_p2_uncompress(&q, g2s + 96 * i) != BLST_SUCCESS) return 0;",
+  "from": "!= BLST_SUCCESS",
+  "to": "== BLST_SUCCESS",
+  "what": "valid G2 refused"
+ },
+ {
+  "id": "pair-p2-stride",
+  "line": "        if (blst_p2_uncompress(&q, g2s + 96 * i) != BLST_SUCCESS) return 0;",
+  "from": "96 * i",
+  "to": "95 * i",
+  "what": "G2 stride 95"
+ },
+ {
+  "id": "pair-inf-or",
+  "line": "        if (blst_p1_affine_is_inf(&p) || blst_p2_affine_is_inf(&q)) return 0;",
+  "from": "||",
+  "to": "&&",
+  "what": "both points must be infinity to be refused"
+ },
+ {
+  "id": "pair-inf-p1",
+  "line": "        if (blst_p1_affine_is_inf(&p) || blst_p2_affine_is_inf(&q)) return 0;",
+  "from": "blst_p1_affine_is_inf(&p) || ",
+  "to": "",
+  "what": "G1 infinity accepted"
+ },
+ {
+  "id": "pair-inf-p2",
+  "line": "        if (blst_p1_affine_is_inf(&p) || blst_p2_affine_is_inf(&q)) return 0;",
+  "from": " || blst_p2_affine_is_inf(&q)",
+  "to": "",
+  "what": "G2 infinity accepted"
+ },
+ {
+  "id": "pair-sub-or",
+  "line": "        if (!blst_p1_affine_in_g1(&p) || !blst_p2_affine_in_g2(&q)) return 0;",
+  "from": "||",
+  "to": "&&",
+  "what": "one subgroup check is enough"
+ },
+ {
+  "id": "pair-sub-g1",
+  "line": "        if (!blst_p1_affine_in_g1(&p) || !blst_p2_affine_in_g2(&q)) return 0;",
+  "from": "!blst_p1_affine_in_g1(&p) || ",
+  "to": "",
+  "what": "G1 subgroup not checked"
+ },
+ {
+  "id": "pair-sub-g2",
+  "line": "        if (!blst_p1_affine_in_g1(&p) || !blst_p2_affine_in_g2(&q)) return 0;",
+  "from": " || !blst_p2_affine_in_g2(&q)",
+  "to": "",
+  "what": "G2 subgroup not checked"
+ },
+ {
+  "id": "pair-c1",
+  "line": "        if (memcmp(back, g1s + 48 * i, 48) != 0) return 0;",
+  "from": "!= 0",
+  "to": "== 0",
+  "what": "canonical G1 refused"
+ },
+ {
+  "id": "pair-c1-len",
+  "line": "        if (memcmp(back, g1s + 48 * i, 48) != 0) return 0;",
+  "from": "i, 48)",
+  "to": "i, 47)",
+  "what": "last G1 byte not compared"
+ },
+ {
+  "id": "pair-c2",
+  "line": "        if (memcmp(back, g2s + 96 * i, 96) != 0) return 0;",
+  "from": "!= 0",
+  "to": "== 0",
+  "what": "canonical G2 refused"
+ },
+ {
+  "id": "pair-c2-len",
+  "line": "        if (memcmp(back, g2s + 96 * i, 96) != 0) return 0;",
+  "from": "i, 96)",
+  "to": "i, 95)",
+  "what": "last G2 byte not compared"
+ },
+ {
+  "id": "pair-mul",
+  "line": "        blst_fp12_mul(&t, &acc, &ml);",
+  "from": "&acc, &ml",
+  "to": "&ml, &ml",
+  "what": "accumulator dropped"
+ },
+ {
+  "id": "pair-acc",
+  "line": "        acc = t;",
+  "from": "acc = t;",
+  "to": "acc = ml;",
+  "what": "accumulator replaced by the last Miller value"
+ },
+ {
+  "id": "pair-final-out",
+  "line": "    gt_to_bytes(out, &t);",
+  "from": "&t",
+  "to": "&acc",
+  "what": "final exponentiation skipped in the output"
+ }
+]

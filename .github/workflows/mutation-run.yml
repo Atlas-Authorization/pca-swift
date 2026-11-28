@@ -1,0 +1,129 @@
+name: Mutation run job
+
+# One job of the core schema mutation pipeline (called by mutation.yml, one call per matrix entry; see the `plan0` job there): the items
+# of jobs-<level>/<job>.json, run by `mutate.mjs run --items`. A schema job restores its group's prebuilt switch build
+# (schema-bundle-<g>, same absolute path as built) and decides each mutant with PCA_MUTANT=<id>: the test classes that reach it first,
+# then the full suite. A real job (the fallback mutants the schema cannot hold, and the self-check samples) restores the baseline build
+# (oracle-linux) and builds each mutant, as the former slices did. Every job stops starting items 54 minutes after it began and kills
+# the runs still going: whatever it did not decide goes to pending.json for the next level, so no job outlives its 60-minute limit.
+on:
+  workflow_call:
+    inputs:
+      level:
+        type: number
+        required: true
+      job:
+        type: number
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CRATE: swift-pca
+  MODS_RE: '^Sources/(AtlasPCA(VDF|Pairing|Fhe|LweOt|Mpc|MpcNet|FnDsa|Wasm|Ada|OpenSSL|Less)|pca-mpc-party)/'
+  # workers per job (3 test processes on the 4-vCPU runner); the baseline build's tarball holds 2 worker copies (mutation.yml WORKERS)
+  RUN_WORKERS: '3'
+  WORKERS: '2'
+
+jobs:
+  run:
+    name: level ${{ inputs.level }} job ${{ inputs.job }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Job start (the deadline counts from here)
+        run: echo "JOB_T0=$(date +%s)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Flagship tooling + source layout
+        run: .github/scripts/mutation-layout.sh "$CRATE"
+      - uses: actions/download-artifact@v4
+        with:
+          name: jobs-${{ inputs.level }}
+          path: ${{ runner.temp }}/jobs
+      - id: job
+        run: |
+          f="$RUNNER_TEMP/jobs/jobs/${{ inputs.job }}.json"
+          [ -f "$f" ] || { echo "::error::no job ${{ inputs.job }} in level ${{ inputs.level }}"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/out"; cp "$f" "$RUNNER_TEMP/out/job.json"
+          node -e 'const j = require(process.argv[1]); console.log(`mode=${j.mode}\ngroup=${j.group ?? ""}`); console.error(`${j.mode} job, ${j.items.length} item(s)`)' "$f" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasmtime-host-Linux
+          path: ${{ runner.temp }}/natives
+      - name: Pin the prebuilt wasmtime host (RefSandboxHostTests require it under CI)
+        run: |
+          chmod +x "$RUNNER_TEMP/natives/pca-wasmtime-host"
+          echo "PCA_WASMTIME_HOST_BIN=$RUNNER_TEMP/natives/pca-wasmtime-host" >> "$GITHUB_ENV"
+          echo "PCA_WASMTIME_HOST_SHA256=$(sha256sum "$RUNNER_TEMP/natives/pca-wasmtime-host" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      # the mutants' identity hashes are taken over the PATCHED sources (as in every other job of the pipeline)
+      - name: Linux source patch
+        working-directory: ${{ env.MONO }}
+        run: LINUX_PREP_PATCH_ONLY=1 bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+      - name: SQLite headers
+        run: sudo apt-get install -y -qq libsqlite3-dev libsodium-dev
+      - name: Swift toolchain cache (restore)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/swift
+          key: swift-6.2-ubuntu24.04
+      - name: Linux toolchain (Swift 6.2, swift-crypto; no warm build, the tree is restored prebuilt)
+        working-directory: ${{ env.MONO }}
+        run: |
+          LINUX_PREP_NO_BUILD=1 bash tools/pca-audit/swift-mutate/linux-prep.sh sdks/swift-pca
+          echo "$HOME/swift/usr/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v4
+        if: ${{ steps.job.outputs.mode == 'schema' }}
+        with:
+          name: schema-bundle-${{ steps.job.outputs.group }}
+          path: ${{ runner.temp }}/bundle
+      - uses: actions/download-artifact@v4
+        if: ${{ steps.job.outputs.mode == 'real' }}
+        with:
+          name: oracle-linux
+          path: ${{ runner.temp }}/oracle
+      - name: Restore the prebuilt tree (same absolute paths and mtimes)
+        run: |
+          mkdir -p "$RUNNER_TEMP/smt/swiftmut"
+          if [ "${{ steps.job.outputs.mode }}" = schema ]; then
+            tar -I zstd -C "$RUNNER_TEMP/smt/swiftmut" -xf "$RUNNER_TEMP/bundle/tree.tar.zst"; rm -f "$RUNNER_TEMP/bundle/tree.tar.zst"
+          else
+            tar -I zstd -C "$RUNNER_TEMP/smt/swiftmut" -xf "$RUNNER_TEMP/oracle/build.tar.zst"; rm -f "$RUNNER_TEMP/oracle/build.tar.zst"
+          fi
+          df -h "$RUNNER_TEMP" | tail -1
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/oracle-parts
+          pattern: oracle-part-*
+      - name: Join the oracle parts (each group's measured duration and time limit)
+        run: mkdir -p "$RUNNER_TEMP/oracle" && node .github/scripts/oracle-merge.mjs "$RUNNER_TEMP/oracle-parts" "$RUNNER_TEMP/oracle/oracle.json"
+      - name: Mutate
+        working-directory: ${{ env.MONO }}
+        run: |
+          export TMPDIR="$RUNNER_TEMP/smt"
+          W="$RUN_WORKERS"
+          if [ "${{ steps.job.outputs.mode }}" = real ]; then
+            W="$WORKERS" # the baseline tarball holds this many worker copies
+            for w in $(seq 0 $((W - 1))); do
+              mkdir -p "$TMPDIR/swiftmut/w$w/sdks/swift-pca"
+              ln -sfn "$MONO/sdks/swift-pca/conformance" "$TMPDIR/swiftmut/w$w/sdks/swift-pca/conformance"
+            done
+          fi
+          node -e 'const fs = require("fs"); const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); j.bundle = process.argv[2]; fs.writeFileSync(process.argv[3], JSON.stringify(j))' \
+            "$RUNNER_TEMP/out/job.json" "$RUNNER_TEMP/bundle" "$RUNNER_TEMP/items.json"
+          FILES="$(cd sdks/swift-pca && find Sources -name '*.swift' | LC_ALL=C sort | grep -v -E "$MODS_RE" | tr '\n' ' ')"
+          node tools/pca-audit/swift-mutate/mutate.mjs run "$W" 320 "$RUNNER_TEMP/out/results.json" $FILES \
+            --items="$RUNNER_TEMP/items.json" --oracle-in="$RUNNER_TEMP/oracle" \
+            --deadline=$(( (JOB_T0 + 54 * 60) * 1000 )) --pending-out="$RUNNER_TEMP/out/pending.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lvl${{ inputs.level }}-${{ inputs.job }}
+          path: ${{ runner.temp }}/out/
+          retention-days: 3
+          if-no-files-found: ignore

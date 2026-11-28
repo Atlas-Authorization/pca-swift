@@ -22,7 +22,12 @@ public protocol SecretStore: Sendable {
 public struct PrincipalDeviceKey: Sendable {
     private let store: SecretStore
 
+    #if canImport(Security)
     public init(store: SecretStore = KeychainSecretStore()) { self.store = store }
+    #else
+    /// No Keychain off Apple platforms: the caller names the store.
+    public init(store: SecretStore) { self.store = store }
+    #endif
 
     /// True when a key is stored.
     public var exists: Bool { ((try? store.load()) ?? nil) != nil }
@@ -73,7 +78,7 @@ public struct PrincipalDeviceKey: Sendable {
     }
 }
 
-/// In-memory store, for tests and previews only.
+/// In-memory store, for tests and demos only.
 public final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Data?
@@ -100,12 +105,26 @@ public struct KeychainSecretStore: SecretStore {
          kSecAttrAccount as String: account]
     }
 
-    public func load() throws -> Data? {
+    /// The SecItemCopyMatching query of `load()`.
+    func loadQuery() -> [String: Any] {
         var q = query
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
+        return q
+    }
+
+    /// The SecItemAdd attributes of `save(_:)`: device-bound, not in backups/iCloud, readable only while unlocked.
+    func addQuery(_ secret: Data) -> [String: Any] {
+        var q = query
+        q[kSecValueData as String] = secret
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        q[kSecAttrSynchronizable as String] = false
+        return q
+    }
+
+    public func load() throws -> Data? {
         var out: CFTypeRef?
-        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        let status = SecItemCopyMatching(loadQuery() as CFDictionary, &out)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = out as? Data else { throw StepUpError.storage("SecItemCopyMatching \(status)") }
         return data
@@ -113,12 +132,7 @@ public struct KeychainSecretStore: SecretStore {
 
     public func save(_ secret: Data) throws {
         SecItemDelete(query as CFDictionary)
-        var q = query
-        q[kSecValueData as String] = secret
-        // Device-bound, not in backups/iCloud, readable only while unlocked.
-        q[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        q[kSecAttrSynchronizable as String] = false
-        let status = SecItemAdd(q as CFDictionary, nil)
+        let status = SecItemAdd(addQuery(secret) as CFDictionary, nil)
         guard status == errSecSuccess else { throw StepUpError.storage("SecItemAdd \(status)") }
     }
 

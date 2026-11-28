@@ -4,7 +4,7 @@ import Foundation
 /// accumulator and monitor declarations, selection, val(ω), the host-injected pre-state and its combination, sequencer
 /// reservation receipts (`pca-acc-receipt` v1) resolved through the sequencer's root-signed key set (`pca-sequencer-keys`
 /// v1), the reservation digest and the receipt arithmetic.
-enum IntentAcc {
+public enum IntentAcc {
     static let AGGS = ["sum", "count", "distinct", "max"]
     static let MONITOR_KINDS = ["requires_prior", "precedes", "never", "always", "responds_within"]
     static let MAX_SESSION_ACCUMULATORS = 16
@@ -30,9 +30,9 @@ enum IntentAcc {
     struct TrackedKeySet { let version: Int64; let digest: String }
 
     /// `acc.keyset_versions[root]` is exactly `{version, digest}`: version a safe integer >= 1, digest canonical base64url (32 bytes).
-    static func trackedKeySetError(_ v: JSONValue) -> String? {
+    public static func trackedKeySetError(_ v: JSONValue) -> String? {
         guard case let .object(o) = v else { return "a tracked key set must be an object {version, digest}" }
-        for k in o.keys where k.s != "version" && k.s != "digest" { return "a tracked key set has the unknown member '\(k.s)'" }
+        for k in JS.keyOrder(o) where k.s != "version" && k.s != "digest" { return "a tracked key set has the unknown member '\(k.s)'" }
         guard let ver = IV.int(o["version"]), ver >= 1 else { return "a tracked key set version must be a safe integer >= 1" }
         if IV.digest(o["digest"]) == nil { return "a tracked key set digest must be canonical base64url (32 bytes)" }
         return nil
@@ -47,6 +47,8 @@ enum IntentAcc {
         var maxReceiptAgeMs = DEFAULT_MAX_RECEIPT_AGE_MS
         var maxKeySetAgeMs = DEFAULT_MAX_KEYSET_AGE_MS
         var tracked: TrackedKeySet?
+        /// A bare version floor (a replaying verifier that knows versions only, e.g. an evidence bundle): `version >= floor`.
+        var minKeySetVersion: Double?
     }
     static let RECEIPT_KEYS = ["v", "kind", "session", "acc", "seq", "pre", "delta", "post", "pcactn_digest", "aud", "issued_at", "expires_at", "kid",
                                "ledger", "signer", "alg", "pq_pk", "sig", "pq_sig"]
@@ -64,9 +66,9 @@ enum IntentAcc {
         }
     }
 
-    static func accumulatorDeclError(_ av: JSONValue) -> String? {
+    public static func accumulatorDeclError(_ av: JSONValue) -> String? {
         guard case let .object(a) = av else { return "accumulator must be an object" }
-        for k in a.keys where !has(["id", "agg", "val", "unit", "sel", "win", "key", "domain_max", "cap", "holder"], k) {
+        for k in JS.keyOrder(a) where !has(["id", "agg", "val", "unit", "sel", "win", "key", "domain_max", "cap", "holder"], k) {
             return "accumulator: unknown member '\(k.s)'"
         }
         guard let id = a["id"]?.asString, IV.isId(id), !IV.isReserved(id) else {
@@ -78,7 +80,7 @@ enum IntentAcc {
         if let v = a["val"], !(v.asString.map(IV.isTopParamPath) ?? false) { return "\(at): val must be action.params.<name>" }
         if let u = a["unit"], !(u.asString.map { IV.u16($0) <= 64 && IV.isUnitId($0) } ?? false) { return "\(at): unit must be a unit id" }
         guard case let .object(sel)? = a["sel"] else { return "\(at): sel must be an object" }
-        for k in sel.keys where !has(["verbs", "accumulates_into", "event"], k) { return "\(at): sel has unknown member '\(k.s)'" }
+        for k in JS.keyOrder(sel) where !has(["verbs", "accumulates_into", "event"], k) { return "\(at): sel has unknown member '\(k.s)'" }
         if let vv = sel["verbs"] {
             guard case let .array(vs) = vv, !vs.isEmpty, vs.count <= 64, vs.allSatisfy({ ($0.asString.map { !$0.isEmpty }) ?? false }) else {
                 return "\(at): sel.verbs must be 1..64 verb names"
@@ -110,7 +112,7 @@ enum IntentAcc {
         case "site_local", "wallet":
             if h.count != 1 { return "\(at): holder \(hk) has no other member" }
         case "sequenced":
-            for k in h.keys where !has(["kind", "uri", "root", "root_alg", "root_pq_pk", "keys_uri"], k) { return "\(at): holder sequenced has unknown member '\(k.s)'" }
+            for k in JS.keyOrder(h) where !has(["kind", "uri", "root", "root_alg", "root_pq_pk", "keys_uri"], k) { return "\(at): holder sequenced has unknown member '\(k.s)'" }
             guard let uri = h["uri"]?.asString, !uri.isEmpty else { return "\(at): holder sequenced needs a uri" }
             if IV.digest(h["root"]) == nil { return "\(at): holder.root is not canonical base64url (32 bytes)" }
             if let se = IV.suiteError(h["root_alg"]) { return "\(at): holder.root_alg: \(se)" }
@@ -138,9 +140,9 @@ enum IntentAcc {
         }
     }
 
-    static func monitorDeclError(_ mv: JSONValue) -> String? {
+    public static func monitorDeclError(_ mv: JSONValue) -> String? {
         guard case let .object(m) = mv else { return "monitor must be an object" }
-        for k in m.keys where !has(["id", "kind", "p", "q", "status", "within"], k) { return "monitor: unknown member '\(k.s)'" }
+        for k in JS.keyOrder(m) where !has(["id", "kind", "p", "q", "status", "within"], k) { return "monitor: unknown member '\(k.s)'" }
         guard let id = m["id"]?.asString, IV.isId(id), !IV.isReserved(id) else {
             return "monitor id must match [A-Za-z0-9_]{1,64} and not be __proto__ / constructor / prototype"
         }
@@ -173,7 +175,7 @@ enum IntentAcc {
     // ---- selection, values, combination ----
 
     /// `accumulationParams(v, unit)`: the integer params of a verb entry whose `accumulates_into` lists `unit` (UTF-8 order).
-    static func accumulationParams(_ v: JObject, _ unit: String) -> [String] {
+    public static func accumulationParams(_ v: JObject, _ unit: String) -> [String] {
         guard case let .object(ps)? = v["params"] else { return [] }
         return ps.keys.sorted().filter { k in
             guard case let .object(d)? = ps[k], IV.same(d["type"]?.asString, "integer") else { return false }
@@ -238,7 +240,7 @@ enum IntentAcc {
 
     /// `preStateError`: nil when the injected pre-state is exactly `{sum}` / `{count}` / `{max}` (a non-negative safe
     /// integer) or `{values}` (distinct strings).
-    static func preStateError(_ agg: String, _ s: JSONValue) -> String? {
+    public static func preStateError(_ agg: String, _ s: JSONValue) -> String? {
         guard case let .object(o) = s else { return "pre-state must be an object" }
         let want = preKey(agg)
         if !(o.count == 1 && o[JKey(want)] != nil) { return "pre-state of a \(agg) accumulator is {\(want)}" }
@@ -266,7 +268,7 @@ enum IntentAcc {
         return IV.isSafeDouble(post) ? post : nil
     }
 
-    static func preValue(_ agg: String, _ pre: JSONValue) -> Double {
+    public static func preValue(_ agg: String, _ pre: JSONValue) -> Double {
         switch agg {
         case "sum": return Double(IV.nonNeg(pre.get("sum")) ?? 0)
         case "count": return Double(IV.nonNeg(pre.get("count")) ?? 0)
@@ -286,7 +288,7 @@ enum IntentAcc {
 
     static func receiptShapeError(_ rv: JSONValue) -> String? {
         guard case let .object(r) = rv else { return "receipt is not an object" }
-        for k in r.keys where !has(RECEIPT_KEYS, k) { return "receipt: unknown member '\(k.s)'" }
+        for k in JS.keyOrder(r) where !has(RECEIPT_KEYS, k) { return "receipt: unknown member '\(k.s)'" }
         if IV.num(r["v"]) != 1 || !IV.same(r["kind"]?.asString, "pca-acc-receipt") { return "not a pca-acc-receipt v1" }
         if IV.digest(r["session"]) == nil { return "receipt.session is not canonical base64url (32 bytes)" }
         if !(r["acc"]?.asString.map(IV.isId) ?? false) { return "receipt.acc is not an accumulator id" }
@@ -376,7 +378,8 @@ enum IntentAcc {
     /// `issued_at <= now + 60000`; the receipt verifies under that entry (PQ pinned by the entry).
     static func verifyAgainstHolder(_ rv: JSONValue, holder: JObject, keySets: JSONValue?, now: Double, fresh: Freshness = Freshness()) -> IV.SuiteVerdict {
         if !IV.isSafeDouble(now) || !(IV.isSafeDouble(fresh.maxReceiptAgeMs) && fresh.maxReceiptAgeMs >= 0)
-            || !(IV.isSafeDouble(fresh.maxKeySetAgeMs) && fresh.maxKeySetAgeMs >= 0) { return .invalid }
+            || !(IV.isSafeDouble(fresh.maxKeySetAgeMs) && fresh.maxKeySetAgeMs >= 0)
+            || (fresh.minKeySetVersion.map { !(IV.isSafeDouble($0) && $0 >= 0) } ?? false) { return .invalid }
         let sets: [JSONValue]
         switch keySets {
         case nil: sets = []
@@ -394,9 +397,10 @@ enum IntentAcc {
             case .unsupported: unsupported = true; continue
             case .invalid: continue
             }
+            if let mv = fresh.minKeySetVersion, let kv = IV.num(k.get("version")), kv < mv { continue }
             // the tracked {version, digest}: an older set is a rollback, ANOTHER set under the same version an equivocation (skip)
             if let t = fresh.tracked {
-                let v = IV.nonNeg(k.get("version")) ?? 0
+                guard let v = IV.nonNeg(k.get("version")) else { continue } // keySetShapeError passed: version >= 1
                 if v < t.version || (v == t.version && !IV.same(keySetDigest(k), t.digest)) { continue }
             }
             guard let ksIssued = IV.num(k.get("issued_at")), ksIssued <= now + RECEIPT_SKEW_MS, now - ksIssued <= fresh.maxKeySetAgeMs else { continue }
@@ -410,17 +414,14 @@ enum IntentAcc {
             }
             if IV.sigAlg(e["alg"]) != IV.sigAlg(r["alg"]) { continue }
             let pin = e["pq_pk"].map { $0.asString ?? "" }
-            switch verifyReceiptSignature(rv, expectedSigner: pk, pin: pin) {
-            case .valid: return .valid
-            case .unsupported: unsupported = true
-            case .invalid: break
-            }
+            // receiptShapeError above already returned .unsupported for every alg the dispatch does not resolve
+            if verifyReceiptSignature(rv, expectedSigner: pk, pin: pin) == .valid { return .valid }
         }
         return unsupported ? .unsupported : .invalid
     }
 
     /// `receiptArithmeticOk(a, r, val)`.
-    static func receiptArithmeticOk(_ agg: String, _ r: JSONValue, _ val: Double) -> Bool {
+    public static func receiptArithmeticOk(_ agg: String, _ r: JSONValue, _ val: Double) -> Bool {
         guard let pre = IV.num(r.get("pre")), let delta = IV.num(r.get("delta")), let post = IV.num(r.get("post")) else { return false }
         switch agg {
         case "sum": return delta == val && post == pre + delta

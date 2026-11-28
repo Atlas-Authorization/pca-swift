@@ -7,7 +7,20 @@ import Foundation
 /// by every native verifier suite.
 enum K042 {
     static func dataURL(_ rel: String) -> URL {
-        URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../test-data/" + rel).standardized
+        if rel.hasPrefix("/") { return URL(fileURLWithPath: rel) }  // an absolute path (corpora CI generates outside the tree)
+        return URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../test-data/" + rel).standardized
+    }
+
+    /// ref-<name>-gen.json.gz: the oracle cases that carry private keys, which CI generates with gen-secret-corpus.sh and never commits
+    /// (next to the main corpus unless PCA_SECRET_CORPUS_DIR is set). nil when missing: a test failure under CI ("true"/"1"), else skipped.
+    static func secretCorpusPath(_ file: String, in f: StaticString = #filePath, line l: UInt = #line) -> String? {
+        let env = ProcessInfo.processInfo.environment
+        let dir = env["PCA_SECRET_CORPUS_DIR"] ?? dataURL(file).deletingLastPathComponent().path
+        let path = dir + "/" + URL(fileURLWithPath: file).lastPathComponent.replacingOccurrences(of: ".json.gz", with: "-gen.json.gz")
+        if FileManager.default.fileExists(atPath: path) { return path }
+        if env["CI"] == "true" || env["CI"] == "1" { XCTFail("secret corpus missing (\(path)): CI must generate it with gen-secret-corpus.sh", file: f, line: l) }
+        else { print("skipping: secret corpus missing (\(path)); run gen-secret-corpus.sh") }
+        return nil
     }
 
     /// The raw bytes of a golden file; `.gz` files are decompressed with the system gzip.
@@ -65,6 +78,9 @@ enum K042 {
     /// file: a mutant is judged by a bounded oracle run, and a file the corpus never reaches cannot be killed by it.
     static func requireCovers(_ files: [String]) throws {
         guard let f = ProcessInfo.processInfo.environment["SWIFTMUT_FILE"], !f.isEmpty else { return }
+        // a job that pins its oracle (SWIFTMUT_FILTER: an opt-in module's own test classes) chose these classes for every file it mutates; gating them
+        // by the core's cover tokens would skip them for every module file (no module path names a core token) and leave its mutants untested
+        if !(ProcessInfo.processInfo.environment["SWIFTMUT_FILTER"] ?? "").isEmpty { return }
         if !files.contains(where: { f.contains($0) }) { throw XCTSkip("this oracle does not cover \(f)") }
     }
 

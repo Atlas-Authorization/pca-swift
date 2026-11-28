@@ -1,0 +1,68 @@
+name: ML-DSA (vendored)
+
+# ML-DSA-65 and ML-DSA-87 ship inside the package as the CMLDSA C target: the pq-crystals reference code liboqs 0.14.0 ships, with the XKCP Keccak it uses,
+# so every consumer verifies and signs with no extra install (CryptoKit stays the backend on macOS / iOS 26). This job proves
+#  * every vendored file matches the SHA-256 list committed next to it,
+#  * every vendored file equals the liboqs 0.14.0 file byte for byte, except the three kinds of file the notice lists as changed,
+#  * every global symbol the target compiles to is prefixed cmldsa_, so it cannot collide with a liboqs, OpenSSL or swift-crypto Keccak / ML-DSA linked in
+#    the same binary.
+on:
+  push:
+    branches: [main, 'ci/**']
+    tags: ['*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIBOQS_TAG: 0.14.0
+
+jobs:
+  vendored:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendored files match the recorded hashes
+        working-directory: Sources/CMLDSA
+        run: grep -v '^#' vendored.sha256 | sha256sum -c -
+      - name: Vendored files are the liboqs release (except the listed changes)
+        working-directory: Sources/CMLDSA
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$LIBOQS_TAG" https://github.com/open-quantum-safe/liboqs.git "$RUNNER_TEMP/liboqs"
+          up="$RUNNER_TEMP/liboqs"
+          # the files the notice lists as changed (parameter set and namespace in config.h, the oqs include in sign.h, the exported names in the Keccak header)
+          changed=" ml_dsa_65/config.h ml_dsa_87/config.h ml_dsa_65/sign.h ml_dsa_87/sign.h keccak/KeccakP-1600-SnP.h "
+          n=0
+          for f in $(find ml_dsa_65 ml_dsa_87 keccak -type f | sort); do
+            case "$f" in
+              ml_dsa_*) L="${f#ml_dsa_}"; L="${L%%/*}"; u="$up/src/sig/ml_dsa/pqcrystals-dilithium-standard_ml-dsa-${L}_ref/${f#*/}" ;;
+              keccak/*) u="$up/src/common/sha3/xkcp_low/KeccakP-1600/plain-64bits/${f#keccak/}" ;;
+            esac
+            [ -f "$u" ] || { echo "::error::$f has no upstream file"; exit 1; }
+            if [[ "$changed" == *" $f "* ]]; then n=$((n + 1)); continue; fi
+            cmp -s "$f" "$u" || { echo "::error::$f differs from liboqs $LIBOQS_TAG"; exit 1; }
+          done
+          cmp -s LICENSE-liboqs "$up/LICENSE.txt" || { echo "::error::LICENSE-liboqs differs"; exit 1; }
+          cmp -s LICENSE-pqcrystals-dilithium "$up/src/sig/ml_dsa/pqcrystals-dilithium-standard_ml-dsa-65_ref/LICENSE" || { echo "::error::LICENSE-pqcrystals-dilithium differs"; exit 1; }
+          [ "$n" -eq 5 ] || { echo "::error::expected 5 changed files, saw $n"; exit 1; }
+      - name: Every exported symbol is prefixed cmldsa_
+        working-directory: Sources/CMLDSA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/o"
+          i=0
+          for f in cmldsa.c cmldsa_random.c cmldsa_sha3.c ml_dsa_65/*.c ml_dsa_87/*.c keccak/*.c; do
+            i=$((i + 1)); cc -std=gnu11 -O1 -Wall -fPIC -Iglue -Ikeccak -Iinclude -c "$f" -o "$RUNNER_TEMP/o/$i.o"
+          done
+          bad="$(nm -g --defined-only "$RUNNER_TEMP"/o/*.o | awk 'NF == 3 && $3 !~ /^cmldsa_/ { print $3 }' | sort -u)"
+          [ -z "$bad" ] || { echo "::error::exported symbols without the cmldsa_ prefix:"; echo "$bad"; exit 1; }
+          echo "$(nm -g --defined-only "$RUNNER_TEMP"/o/*.o | awk 'NF == 3' | sort -u | wc -l) exported symbols, all cmldsa_-prefixed"

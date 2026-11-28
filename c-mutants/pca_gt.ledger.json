@@ -1,0 +1,30 @@
+[
+ {
+  "id": "gt-bytes",
+  "reason": "GT_BYTES is only the declared length of array parameters (`byte out[GT_BYTES]`), which C adjusts to a pointer: no code, bound or loop uses it, so 575 compiles to identical object code."
+ },
+ {
+  "id": "frombytes-len",
+  "reason": "back is blst_fp_from_bendian then blst_bendian_from_fp of the input: the input reduced mod p (mul_fp by RR ends in a conditional subtraction, so back < p), hence back differs from an input >= p by a multiple of p (>= 2^380) and the first 47 big-endian bytes already differ; the 48th byte is never the only difference, so comparing 47 bytes gives the same verdict."
+ },
+ {
+  "id": "pair-flag1-drop",
+  "reason": "blst_p1_uncompress returns BLST_BAD_ENCODING when the compressed bit (0x80) of byte 0 is clear (blst e1.c POINTonE1_Uncompress_Z, `if ((in0 & 0x80) == 0) return BLST_BAD_ENCODING`), and the next line returns 0 on any non-success: the explicit check is redundant."
+ },
+ {
+  "id": "pair-flag2-drop",
+  "reason": "blst_p2_uncompress returns BLST_BAD_ENCODING when the compressed bit (0x80) of byte 0 is clear (blst e2.c POINTonE2_Uncompress_Z, `if ((in0 & 0x80) == 0) return BLST_BAD_ENCODING`), and the next line returns 0 on any non-success: the explicit check is redundant."
+ },
+ {
+  "id": "pair-flag-or",
+  "reason": "with && a point lacking its compression flag passes the explicit check but blst_p1_uncompress / blst_p2_uncompress then reject it (BLST_BAD_ENCODING on a clear 0x80 bit, e1.c / e2.c Uncompress_Z) and the function returns 0 anyway: same verdict as ||."
+ },
+ {
+  "id": "pair-c1-len",
+  "reason": "after a successful blst_p1_uncompress the point is canonical (x < p enforced, non-infinity here, sign bit applied to y) so blst_p1_affine_compress reproduces all 48 input bytes: the recompression comparison never differs, so comparing 47 bytes never does either."
+ },
+ {
+  "id": "pair-c2-len",
+  "reason": "after a successful blst_p2_uncompress the point is canonical (both Fp coordinates < p enforced, non-infinity here, sign bit applied to y) so blst_p2_affine_compress reproduces all 96 input bytes: the recompression comparison never differs, so comparing 95 bytes never does either."
+ }
+]
